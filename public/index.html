@@ -1,0 +1,756 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Генератор SQL</title>
+
+  <!-- Mermaid для ER-диаграмм -->
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs";
+    mermaid.initialize({
+      startOnLoad: false,
+      theme: "dark",
+      securityLevel: "loose",
+      er: { useMaxWidth: true },
+    });
+    window.__mermaid = mermaid;
+  </script>
+
+  <!-- Подсветка синтаксиса SQL -->
+  <link href="https://cdn.jsdelivr.net/npm/prismjs@1/themes/prism-okaidia.min.css" rel="stylesheet" />
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1/prism.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-sql.min.js"></script>
+
+  <style>
+    :root {
+      --bg: #0f1419;
+      --surface: #1a2332;
+      --border: #2d3a4d;
+      --text: #e7eef8;
+      --muted: #8b9bb4;
+      --accent: #3b82f6;
+      --accent-hover: #2563eb;
+      --danger: #f87171;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "Segoe UI", system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+    }
+    .layout { display: flex; min-height: 100vh; }
+
+    /* Боковая панель с историей */
+    .sidebar {
+      width: 300px;
+      max-width: 36vw;
+      border-right: 1px solid var(--border);
+      padding: 1.25rem 1rem;
+      background: rgba(26, 35, 50, 0.65);
+      position: sticky;
+      top: 0;
+      align-self: flex-start;
+      height: 100vh;
+      overflow: auto;
+    }
+    .sidebar-title { font-weight: 700; margin-bottom: 0.75rem; color: var(--text); }
+    .history-list { display: flex; flex-direction: column; gap: 0.5rem; }
+    .history-item {
+      width: 100%;
+      text-align: left;
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 10px;
+      padding: 0.65rem 0.75rem;
+      cursor: pointer;
+      transition: border-color 0.15s ease;
+    }
+    .history-item:hover { border-color: rgba(59, 130, 246, 0.8); }
+    .history-item .meta { font-size: 0.75rem; color: var(--muted); margin-top: 0.35rem; }
+
+    /* Основная область */
+    .main { flex: 1; }
+    .wrap { max-width: 980px; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
+    h1 { font-size: 1.5rem; font-weight: 600; margin: 0 0 1.25rem; }
+
+    label { display: block; font-size: 0.875rem; color: var(--muted); margin-bottom: 0.35rem; }
+    textarea, select, input[type="text"], input[type="password"] {
+      width: 100%;
+      padding: 0.75rem 0.9rem;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--text);
+      font-size: 1rem;
+    }
+    textarea { min-height: 120px; resize: vertical; font-family: inherit; }
+    textarea.mermaid-editor {
+      min-height: 220px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 0.9rem;
+    }
+    .row { display: grid; gap: 1rem; margin-bottom: 1rem; }
+    @media (min-width: 640px) { .row.two { grid-template-columns: 1fr 1fr; } }
+    @media (min-width: 640px) { .row.three { grid-template-columns: 1fr 1fr 1fr; } }
+
+    .temp-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem; }
+    input[type="range"] { flex: 1; min-width: 140px; accent-color: var(--accent); }
+    .temp-value { font-variant-numeric: tabular-nums; color: var(--muted); min-width: 2.5rem; }
+
+    button {
+      padding: 0.65rem 1.25rem;
+      border: none;
+      border-radius: 8px;
+      background: var(--accent);
+      color: #fff;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    button:hover { background: var(--accent-hover); }
+    button:disabled { opacity: 0.55; cursor: not-allowed; }
+
+    .btn-small {
+      padding: 0.45rem 0.7rem;
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--text);
+      border-radius: 8px;
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 0.85rem;
+    }
+    .btn-small:hover { border-color: rgba(59, 130, 246, 0.85); }
+    .btn-small:disabled { opacity: 0.55; cursor: not-allowed; }
+
+    /* Результаты */
+    .results { margin-top: 2rem; display: none; gap: 1.5rem; flex-direction: column; }
+    .results.visible { display: flex; }
+
+    section.card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1rem 1.15rem;
+    }
+    .card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 1rem;
+      margin-bottom: 0.75rem;
+    }
+    .card-header h2 { margin: 0; font-size: 0.95rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
+    .card-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+
+    .mermaid-wrap {
+      overflow-x: auto;
+      background: #fff;
+      border-radius: 8px;
+      padding: 1rem;
+      min-height: 220px;
+    }
+    .mermaid-wrap .mermaid { display: flex; justify-content: center; }
+
+    .code-pre {
+      margin: 0;
+      background: #0c1220;
+      border-radius: 8px;
+      overflow-x: auto;
+      font-size: 0.9rem;
+      padding: 1rem;
+    }
+    .explain-pre { margin: 0; white-space: pre-wrap; word-break: break-word; color: var(--text); }
+    .audit-pre {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      padding: 0.85rem 0.9rem;
+      border-radius: 8px;
+      background: rgba(59, 130, 246, 0.06);
+      border: 1px solid var(--border);
+      color: var(--text);
+      min-height: 70px;
+    }
+
+    .results-actions { display: flex; gap: 0.75rem; flex-wrap: wrap; margin-top: 0.75rem; }
+
+    /* Спиннер загрузки */
+    .spinner {
+      display: inline-block;
+      width: 16px;
+      height: 16px;
+      border: 2px solid rgba(255,255,255,0.35);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      margin-left: 0.6rem;
+      vertical-align: middle;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Ошибки */
+    .error {
+      margin-top: 1rem;
+      padding: 0.9rem 1rem;
+      border-radius: 8px;
+      background: rgba(248, 113, 113, 0.12);
+      border: 1px solid var(--danger);
+      color: var(--danger);
+      display: none;
+    }
+    .error.visible { display: block; }
+    .hint { font-size: 0.8rem; color: var(--muted); margin-top: 0.5rem; }
+  </style>
+</head>
+<body>
+<div class="layout">
+
+  <!-- Боковая панель: история запросов -->
+  <aside class="sidebar">
+    <div class="sidebar-title">История запросов</div>
+    <div id="history" class="history-list"></div>
+  </aside>
+
+  <!-- Основная область -->
+  <div class="main">
+  <div class="wrap">
+    <h1>Генератор SQL (OpenAI)</h1>
+
+    <form id="form" class="row">
+
+      <!-- Код доступа -->
+      <div>
+        <label for="access_code">Код доступа</label>
+        <input type="password" id="access_code" placeholder="Введите код доступа" autocomplete="off" />
+        <p class="hint">Код доступа задаётся в переменных окружения Netlify (ACCESS_CODE).</p>
+      </div>
+
+      <!-- Запрос пользователя -->
+      <div>
+        <label for="user_prompt">Опишите задачу или вставьте SQL для reverse engineering</label>
+        <textarea id="user_prompt" placeholder="Например: показать всех клиентов, у которых больше 3 заказов…"></textarea>
+      </div>
+
+      <!-- Модель, диалект, температура -->
+      <div class="row three">
+        <div>
+          <label for="model">Модель</label>
+          <select id="model"></select>
+        </div>
+        <div>
+          <label for="dialect">Диалект SQL</label>
+          <select id="dialect"></select>
+        </div>
+        <div>
+          <label>Температура: <span id="temp_display"></span></label>
+          <div class="temp-row">
+            <input type="range" id="temperature" min="0" max="2" step="0.1" value="0.2" />
+          </div>
+        </div>
+      </div>
+
+      <!-- Дополнительные поля -->
+      <div class="row two">
+        <div>
+          <label for="existing_schema">Существующая схема (DDL) — опционально</label>
+          <textarea id="existing_schema" style="min-height:80px" placeholder="CREATE TABLE ..."></textarea>
+        </div>
+        <div>
+          <label for="business_rules">Бизнес-правила — опционально</label>
+          <textarea id="business_rules" style="min-height:80px" placeholder="Например: один клиент может иметь несколько заказов..."></textarea>
+        </div>
+      </div>
+
+      <button type="submit" id="submit_btn">
+        Сгенерировать
+        <span class="spinner" id="submit_spinner" style="display:none"></span>
+      </button>
+    </form>
+
+    <!-- Блок ошибки -->
+    <div id="error_block" class="error" role="alert"></div>
+
+    <!-- Результаты -->
+    <div id="results" class="results">
+
+      <!-- ER-диаграмма -->
+      <section class="card">
+        <div class="card-header">
+          <h2>ER-диаграмма (Mermaid)</h2>
+          <div class="card-actions">
+            <button class="btn-small" id="copy_mermaid_btn" disabled>Копировать код</button>
+          </div>
+        </div>
+        <!-- Редактор Mermaid кода -->
+        <textarea class="mermaid-editor" id="mermaid_editor" placeholder="erDiagram ..."></textarea>
+        <!-- Отрисованная диаграмма -->
+        <div class="mermaid-wrap" id="diagram_host" style="margin-top:0.75rem"></div>
+      </section>
+
+      <!-- SQL -->
+      <section class="card">
+        <div class="card-header">
+          <h2>SQL</h2>
+          <div class="card-actions">
+            <button class="btn-small" id="copy_sql_btn" disabled>Копировать SQL</button>
+          </div>
+        </div>
+        <pre class="code-pre"><code id="sql_code" class="language-sql"></code></pre>
+      </section>
+
+      <!-- Объяснение -->
+      <section class="card">
+        <div class="card-header">
+          <h2>Логика запроса</h2>
+          <div class="card-actions">
+            <button class="btn-small" id="copy_explain_btn" disabled>Копировать</button>
+          </div>
+        </div>
+        <pre class="explain-pre" id="explain_out"></pre>
+      </section>
+
+      <!-- Кнопки дополнительных модулей -->
+      <div class="results-actions">
+        <button class="btn-small" id="analyze_btn" disabled>Архитектурный аудит</button>
+        <button class="btn-small" id="mock_btn" disabled>Генерировать mock data</button>
+        <button class="btn-small" id="export_btn" disabled>Экспорт .md</button>
+      </div>
+
+      <!-- Аудит архитектуры -->
+      <section class="card" id="audit_card" style="display:none">
+        <h2 style="font-size:0.95rem;text-transform:uppercase;letter-spacing:0.04em;color:var(--muted);margin:0 0 0.75rem">Архитектурный аудит</h2>
+        <pre class="audit-pre" id="audit_out"></pre>
+      </section>
+
+      <!-- Mock data -->
+      <section class="card" id="mock_card" style="display:none">
+        <h2 style="font-size:0.95rem;text-transform:uppercase;letter-spacing:0.04em;color:var(--muted);margin:0 0 0.75rem">Mock Data (INSERT)</h2>
+        <pre class="code-pre"><code id="inserts_code" class="language-sql"></code></pre>
+        <pre class="explain-pre" id="mock_notes" style="margin-top:0.75rem;font-size:0.85rem;color:var(--muted)"></pre>
+      </section>
+
+    </div><!-- /results -->
+  </div><!-- /wrap -->
+  </div><!-- /main -->
+</div><!-- /layout -->
+
+<script>
+  // ─── Конфиг ────────────────────────────────────────────────────────────────
+  // Загружаем config.json (вместо Jinja2 шаблонов Flask)
+  let CONFIG = {};
+
+  async function loadConfig() {
+    try {
+      const res = await fetch("/config.json");
+      CONFIG = await res.json();
+    } catch {
+      CONFIG = {
+        models: [{ id: "gpt-4o-mini", label: "GPT-4o mini" }],
+        dialects: [{ id: "postgresql", label: "PostgreSQL" }],
+        default_model: "gpt-4o-mini",
+        default_dialect: "postgresql",
+        temperature_default: 0.2,
+        temperature_min: 0,
+        temperature_max: 2,
+        temperature_step: 0.1,
+      };
+    }
+    initSelects();
+  }
+
+  // Заполняем селекты моделей и диалектов из конфига
+  function initSelects() {
+    const modelEl = document.getElementById("model");
+    const dialectEl = document.getElementById("dialect");
+    const tempEl = document.getElementById("temperature");
+
+    CONFIG.models.forEach((m) => {
+      const opt = document.createElement("option");
+      opt.value = m.id;
+      opt.textContent = m.label;
+      if (m.id === CONFIG.default_model) opt.selected = true;
+      modelEl.appendChild(opt);
+    });
+
+    CONFIG.dialects.forEach((d) => {
+      const opt = document.createElement("option");
+      opt.value = d.id;
+      opt.textContent = d.label;
+      if (d.id === CONFIG.default_dialect) opt.selected = true;
+      dialectEl.appendChild(opt);
+    });
+
+    tempEl.min = CONFIG.temperature_min;
+    tempEl.max = CONFIG.temperature_max;
+    tempEl.step = CONFIG.temperature_step;
+    tempEl.value = CONFIG.temperature_default;
+    syncTempLabel();
+  }
+
+  // ─── Элементы DOM ──────────────────────────────────────────────────────────
+  const form          = document.getElementById("form");
+  const submitBtn     = document.getElementById("submit_btn");
+  const submitSpinner = document.getElementById("submit_spinner");
+  const errorBlock    = document.getElementById("error_block");
+  const resultsEl     = document.getElementById("results");
+  const temperatureEl = document.getElementById("temperature");
+  const modelEl       = document.getElementById("model");
+  const dialectEl     = document.getElementById("dialect");
+  const userPromptEl  = document.getElementById("user_prompt");
+  const existingSchemaEl = document.getElementById("existing_schema");
+  const businessRulesEl  = document.getElementById("business_rules");
+  const mermaidEditor = document.getElementById("mermaid_editor");
+  const diagramHost   = document.getElementById("diagram_host");
+  const sqlCodeEl     = document.getElementById("sql_code");
+  const explainOut    = document.getElementById("explain_out");
+  const auditOutEl    = document.getElementById("audit_out");
+  const auditCard     = document.getElementById("audit_card");
+  const mockCard      = document.getElementById("mock_card");
+  const insertsCodeEl = document.getElementById("inserts_code");
+  const mockNotesEl   = document.getElementById("mock_notes");
+  const analyzeBtn    = document.getElementById("analyze_btn");
+  const mockBtn       = document.getElementById("mock_btn");
+  const exportBtn     = document.getElementById("export_btn");
+  const copyMermaidBtn  = document.getElementById("copy_mermaid_btn");
+  const copySqlBtn      = document.getElementById("copy_sql_btn");
+  const copyExplainBtn  = document.getElementById("copy_explain_btn");
+  const historyEl     = document.getElementById("history");
+
+  // ─── Утилиты ───────────────────────────────────────────────────────────────
+  function syncTempLabel() {
+    document.getElementById("temp_display").textContent =
+      Number(temperatureEl.value).toFixed(1);
+  }
+  temperatureEl.addEventListener("input", syncTempLabel);
+
+  function getAccessCode() {
+    return document.getElementById("access_code").value.trim();
+  }
+
+  function showError(msg) {
+    errorBlock.textContent = msg;
+    errorBlock.classList.add("visible");
+  }
+  function hideError() {
+    errorBlock.classList.remove("visible");
+    errorBlock.textContent = "";
+  }
+
+  function setControlsEnabled(enabled) {
+    analyzeBtn.disabled   = !enabled;
+    mockBtn.disabled      = !enabled;
+    exportBtn.disabled    = !enabled;
+    copyMermaidBtn.disabled = !enabled;
+    copySqlBtn.disabled   = !enabled;
+    copyExplainBtn.disabled = !enabled;
+  }
+
+  function highlightSqlCode(el) {
+    if (window.Prism) Prism.highlightElement(el);
+  }
+
+  async function copyText(text) {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      prompt("Скопируйте вручную:", text);
+    }
+  }
+
+  // ─── Mermaid ───────────────────────────────────────────────────────────────
+  let mermaidDebounceTimer = null;
+  let suppressMermaidInput = false;
+
+  async function renderMermaid(code) {
+    const clean = (code || "").trim();
+    diagramHost.innerHTML = "";
+    if (!clean) {
+      diagramHost.innerHTML = "<p style='color:#666;margin:0;padding:1rem'>Диаграмма не сгенерирована.</p>";
+      return;
+    }
+    const el = document.createElement("div");
+    el.className = "mermaid";
+    el.textContent = clean;
+    diagramHost.appendChild(el);
+    const mm = window.__mermaid;
+    if (!mm) {
+      diagramHost.innerHTML = "<p style='color:#c00'>Mermaid не загрузился.</p>";
+      return;
+    }
+    try {
+      await mm.run({ nodes: [el] });
+    } catch (e) {
+      diagramHost.innerHTML = "";
+      const pre = document.createElement("pre");
+      pre.className = "code-pre";
+      pre.textContent = "Ошибка отрисовки Mermaid:\n" + e + "\n\n" + clean;
+      diagramHost.appendChild(pre);
+    }
+  }
+
+  async function setMermaidFromModel(code) {
+    suppressMermaidInput = true;
+    mermaidEditor.value = code || "";
+    suppressMermaidInput = false;
+    await renderMermaid(code);
+  }
+
+  // Авто-обновление диаграммы при редактировании кода (debounce 500ms)
+  mermaidEditor.addEventListener("input", () => {
+    if (suppressMermaidInput) return;
+    clearTimeout(mermaidDebounceTimer);
+    mermaidDebounceTimer = setTimeout(() => renderMermaid(mermaidEditor.value), 500);
+  });
+
+  // ─── История ───────────────────────────────────────────────────────────────
+  let currentHistoryId = null;
+
+  function loadHistory() {
+    try { return JSON.parse(localStorage.getItem("sql_history") || "[]"); }
+    catch { return []; }
+  }
+
+  function saveHistory(list) {
+    localStorage.setItem("sql_history", JSON.stringify(list.slice(0, 30)));
+  }
+
+  function renderHistory() {
+    const list = loadHistory();
+    historyEl.innerHTML = "";
+    list.forEach((item) => {
+      const btn = document.createElement("button");
+      btn.className = "history-item";
+      const preview = (item.input?.user_prompt || "").slice(0, 60);
+      const date = new Date(item.ts).toLocaleString("ru");
+      btn.innerHTML = `<div>${preview}…</div><div class="meta">${date}</div>`;
+      btn.addEventListener("click", () => restoreHistoryItem(item));
+      historyEl.appendChild(btn);
+    });
+  }
+
+  async function restoreHistoryItem(item) {
+    currentHistoryId = item.id;
+    userPromptEl.value      = item?.input?.user_prompt || "";
+    temperatureEl.value     = item?.input?.temperature ?? temperatureEl.value;
+    syncTempLabel();
+    modelEl.value           = item?.input?.model || modelEl.value;
+    dialectEl.value         = item?.input?.dialect || dialectEl.value;
+    existingSchemaEl.value  = item?.input?.existing_schema || "";
+    businessRulesEl.value   = item?.input?.business_rules || "";
+
+    const out = item?.output || {};
+    sqlCodeEl.textContent   = out.sql || "";
+    highlightSqlCode(sqlCodeEl);
+    explainOut.textContent  = out.explanation || "";
+    auditOutEl.textContent  = item?.audit || "";
+    auditCard.style.display = item?.audit ? "block" : "none";
+
+    resultsEl.classList.add("visible");
+    setControlsEnabled(true);
+    await setMermaidFromModel(out.er_diagram || "");
+
+    if (out.inserts) {
+      mockCard.style.display = "block";
+      insertsCodeEl.textContent = out.inserts;
+      highlightSqlCode(insertsCodeEl);
+      mockNotesEl.textContent = out.mock_notes || "";
+    } else {
+      mockCard.style.display = "none";
+    }
+  }
+
+  function upsertHistoryPatch(id, patch) {
+    if (!id) return;
+    const list = loadHistory();
+    const idx = list.findIndex((x) => x.id === id);
+    if (idx === -1) return;
+    list[idx] = { ...list[idx], ...patch };
+    saveHistory(list);
+    renderHistory();
+  }
+
+  // ─── Copy кнопки ───────────────────────────────────────────────────────────
+  copyMermaidBtn.addEventListener("click", () => copyText(mermaidEditor.value));
+  copySqlBtn.addEventListener("click",     () => copyText(sqlCodeEl.textContent));
+  copyExplainBtn.addEventListener("click", () => copyText(explainOut.textContent));
+
+  // ─── Архитектурный аудит ───────────────────────────────────────────────────
+  analyzeBtn.addEventListener("click", async () => {
+    try {
+      analyzeBtn.disabled = true;
+      const accessCode = getAccessCode();
+      if (!accessCode) { showError("Введите код доступа."); return; }
+
+      const res = await fetch("/analyze_architecture", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Access-Code": accessCode },
+        body: JSON.stringify({
+          mermaid_er: mermaidEditor.value,
+          dialect: dialectEl.value,
+          sql: sqlCodeEl.textContent,
+          model: modelEl.value,
+          temperature: parseFloat(temperatureEl.value),
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `Ошибка сервера (${res.status})`);
+
+      auditOutEl.textContent = data.audit || "";
+      auditCard.style.display = "block";
+      upsertHistoryPatch(currentHistoryId, { audit: auditOutEl.textContent });
+    } catch (e) {
+      showError("Ошибка анализа: " + e.message);
+    } finally {
+      setControlsEnabled(true);
+    }
+  });
+
+  // ─── Mock data ─────────────────────────────────────────────────────────────
+  mockBtn.addEventListener("click", async () => {
+    try {
+      mockBtn.disabled = true;
+      const accessCode = getAccessCode();
+      if (!accessCode) { showError("Введите код доступа."); return; }
+
+      const res = await fetch("/generate_mock_data", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Access-Code": accessCode },
+        body: JSON.stringify({
+          mermaid_er: mermaidEditor.value,
+          dialect: dialectEl.value,
+          model: modelEl.value,
+          temperature: parseFloat(temperatureEl.value),
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `Ошибка сервера (${res.status})`);
+
+      insertsCodeEl.textContent = data.inserts || "";
+      highlightSqlCode(insertsCodeEl);
+      mockNotesEl.textContent = data.notes || "";
+      mockCard.style.display = "block";
+
+      const history = loadHistory();
+      const item = history.find((x) => x.id === currentHistoryId);
+      if (item) {
+        item.output = { ...item.output, inserts: data.inserts, mock_notes: data.notes };
+        saveHistory(history);
+      }
+    } catch (e) {
+      showError("Ошибка генерации mock data: " + e.message);
+    } finally {
+      setControlsEnabled(true);
+    }
+  });
+
+  // ─── Экспорт в Markdown ────────────────────────────────────────────────────
+  exportBtn.addEventListener("click", () => {
+    const mermaid = mermaidEditor.value || "";
+    const sql = sqlCodeEl.textContent || "";
+    const audit = auditOutEl.textContent || "";
+    const md =
+      `# SQL Generator Output\n\n` +
+      `## ER Diagram (Mermaid)\n\`\`\`mermaid\n${mermaid}\n\`\`\`\n\n` +
+      `## SQL\n\`\`\`sql\n${sql}\n\`\`\`\n\n` +
+      `## Архитектурный аудит\n\n${audit || "_(аудит не выполнен)_"}\n`;
+
+    const blob = new Blob([md], { type: "text/markdown;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `sql-export-${new Date().toISOString().slice(0, 10)}.md`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  });
+
+  // ─── Основная форма: генерация ─────────────────────────────────────────────
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    hideError();
+    submitBtn.disabled = true;
+    submitSpinner.style.display = "inline-block";
+    resultsEl.classList.remove("visible");
+    mockCard.style.display = "none";
+    auditCard.style.display = "none";
+    auditOutEl.textContent = "";
+    insertsCodeEl.textContent = "";
+
+    const accessCode = getAccessCode();
+    if (!accessCode) {
+      showError("Введите код доступа.");
+      submitBtn.disabled = false;
+      submitSpinner.style.display = "none";
+      return;
+    }
+
+    const payload = {
+      user_prompt:     userPromptEl.value,
+      temperature:     parseFloat(temperatureEl.value),
+      model:           modelEl.value,
+      dialect:         dialectEl.value,
+      existing_schema: existingSchemaEl.value,
+      business_rules:  businessRulesEl.value,
+      access_code:     accessCode,
+    };
+
+    try {
+      const res = await fetch("/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Access-Code": accessCode },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) { showError(data.error || `Ошибка сервера (${res.status})`); return; }
+
+      const er          = (data.er_diagram || "").trim();
+      const sql         = data.sql || "";
+      const explanation = data.explanation || "";
+
+      sqlCodeEl.textContent  = sql;
+      highlightSqlCode(sqlCodeEl);
+      explainOut.textContent = explanation;
+
+      await setMermaidFromModel(er);
+      resultsEl.classList.add("visible");
+      setControlsEnabled(true);
+
+      // Сохраняем в историю
+      const entry = {
+        id:     String(Date.now()),
+        ts:     new Date().toISOString(),
+        input:  { user_prompt: userPromptEl.value, temperature: parseFloat(temperatureEl.value), model: modelEl.value, dialect: dialectEl.value, existing_schema: existingSchemaEl.value, business_rules: businessRulesEl.value },
+        output: { er_diagram: er, sql, explanation },
+        audit:  "",
+      };
+      const history = loadHistory();
+      history.unshift(entry);
+      saveHistory(history);
+      currentHistoryId = entry.id;
+      renderHistory();
+
+    } catch (err) {
+      showError("Сеть или браузер: " + err);
+    } finally {
+      submitBtn.disabled = false;
+      submitSpinner.style.display = "none";
+    }
+  });
+
+  // ─── Инициализация ─────────────────────────────────────────────────────────
+  mockCard.style.display  = "none";
+  auditCard.style.display = "none";
+  resultsEl.classList.remove("visible");
+  setControlsEnabled(false);
+  renderHistory();
+  loadConfig(); // загружаем конфиг и инициализируем селекты
+</script>
+</body>
+</html>
