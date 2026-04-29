@@ -24,8 +24,8 @@ sql-generator-js/
 ```bash
 git init
 git add .
-git commit -m "init"
-git remote add origin https://github.com/твой-username/sql-generator-js.git
+git commit -m "init"git remote add origin https://github.com/твой-username/sql-generator-js.git
+
 git push -u origin main
 ```
 
