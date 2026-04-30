@@ -1,0 +1,20 @@
+{
+  "models": [
+    { "id": "gpt-4o", "label": "GPT-4o" },
+    { "id": "gpt-4o-mini", "label": "GPT-4o mini" },
+    { "id": "gpt-4-turbo", "label": "GPT-4 Turbo" },
+    { "id": "gpt-3.5-turbo", "label": "GPT-3.5 Turbo" }
+  ],
+  "dialects": [
+    { "id": "postgresql", "label": "PostgreSQL" },
+    { "id": "oracle", "label": "Oracle (PL/SQL)" },
+    { "id": "mssql", "label": "MS SQL Server (T-SQL)" },
+    { "id": "mysql", "label": "MySQL" }
+  ],
+  "default_model": "gpt-4o-mini",
+  "default_dialect": "postgresql",
+  "temperature_default": 0.2,
+  "temperature_min": 0,
+  "temperature_max": 2,
+  "temperature_step": 0.1
+}

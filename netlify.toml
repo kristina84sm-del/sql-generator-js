@@ -1,0 +1,27 @@
+[build]
+  publish = "public"
+  functions = "netlify/functions"
+
+[[redirects]]
+  from = "/auth"
+  to = "/.netlify/functions/auth"
+  status = 200
+
+[[redirects]]
+  from = "/generate"
+  to = "/.netlify/functions/generate"
+  status = 200
+
+[[redirects]]
+  from = "/analyze_architecture"
+  to = "/.netlify/functions/analyze_architecture"
+  status = 200
+
+[[redirects]]
+  from = "/generate_mock_data"
+  to = "/.netlify/functions/generate_mock_data"
+  status = 200
+
+[dev]
+  framework = "#static"
+  port = 8888

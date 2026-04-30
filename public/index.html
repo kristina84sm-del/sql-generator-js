@@ -1,0 +1,1055 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Генератор SQL</title>
+
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs";
+    mermaid.initialize({ startOnLoad: false, theme: "dark", securityLevel: "loose", er: { useMaxWidth: true } });
+    window.__mermaid = mermaid;
+  </script>
+
+  <link href="https://cdn.jsdelivr.net/npm/prismjs@1/themes/prism-okaidia.min.css" rel="stylesheet" />
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1/prism.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-sql.min.js"></script>
+
+  <style>
+    :root {
+      --bg: #0f1419;
+      --surface: #1a2332;
+      --surface2: #212d3d;
+      --border: #2d3a4d;
+      --text: #e7eef8;
+      --muted: #8b9bb4;
+      --accent: #3b82f6;
+      --accent-hover: #2563eb;
+      --danger: #f87171;
+      --success: #34d399;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "Segoe UI", system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+    }
+
+    /* ── Экран авторизации ── */
+    #auth_screen {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 1rem;
+    }
+    .auth-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 2rem 2.25rem;
+      width: 100%;
+      max-width: 420px;
+    }
+    .auth-card h1 { margin: 0 0 0.25rem; font-size: 1.4rem; }
+    .auth-card .subtitle { color: var(--muted); font-size: 0.9rem; margin-bottom: 1.5rem; }
+    .auth-tabs { display: flex; gap: 0; margin-bottom: 1.5rem; border-bottom: 1px solid var(--border); }
+    .auth-tab {
+      flex: 1;
+      background: none;
+      border: none;
+      border-bottom: 2px solid transparent;
+      color: var(--muted);
+      padding: 0.6rem;
+      cursor: pointer;
+      font-size: 0.95rem;
+      font-weight: 600;
+      transition: color 0.15s, border-color 0.15s;
+      margin-bottom: -1px;
+    }
+    .auth-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+    .auth-field { margin-bottom: 1rem; }
+    .auth-field label { display: block; font-size: 0.85rem; color: var(--muted); margin-bottom: 0.3rem; }
+    .auth-field input {
+      width: 100%;
+      padding: 0.7rem 0.9rem;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--surface2);
+      color: var(--text);
+      font-size: 1rem;
+    }
+    .auth-field input:focus { outline: none; border-color: var(--accent); }
+    .auth-submit {
+      width: 100%;
+      padding: 0.75rem;
+      border: none;
+      border-radius: 8px;
+      background: var(--accent);
+      color: #fff;
+      font-size: 1rem;
+      font-weight: 700;
+      cursor: pointer;
+      margin-top: 0.5rem;
+    }
+    .auth-submit:hover { background: var(--accent-hover); }
+    .auth-submit:disabled { opacity: 0.55; cursor: not-allowed; }
+    .auth-error {
+      margin-top: 0.75rem;
+      padding: 0.65rem 0.9rem;
+      border-radius: 8px;
+      background: rgba(248,113,113,0.12);
+      border: 1px solid var(--danger);
+      color: var(--danger);
+      font-size: 0.9rem;
+      display: none;
+    }
+    .auth-error.visible { display: block; }
+
+    /* ── Основной интерфейс ── */
+    #app_screen { display: none; }
+    .layout { display: flex; min-height: 100vh; }
+
+    /* Боковая панель */
+    .sidebar {
+      width: 280px;
+      max-width: 33vw;
+      border-right: 1px solid var(--border);
+      padding: 1.25rem 1rem;
+      background: rgba(26,35,50,0.65);
+      position: sticky;
+      top: 0;
+      align-self: flex-start;
+      height: 100vh;
+      overflow: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+
+    /* Профиль пользователя */
+    .user-profile {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 0.8rem 0.9rem;
+      margin-bottom: 0.5rem;
+    }
+    .user-profile .user-name { font-weight: 700; font-size: 0.95rem; }
+    .user-profile .user-email { color: var(--muted); font-size: 0.8rem; margin-top: 0.1rem; word-break: break-all; }
+    .user-profile .user-stats { margin-top: 0.55rem; font-size: 0.8rem; color: var(--muted); }
+    .user-profile .user-stats strong { color: var(--accent); }
+    .btn-logout {
+      width: 100%;
+      margin-top: 0.6rem;
+      padding: 0.4rem;
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      background: transparent;
+      color: var(--muted);
+      font-size: 0.82rem;
+      cursor: pointer;
+    }
+    .btn-logout:hover { border-color: var(--danger); color: var(--danger); background: transparent; }
+
+    .sidebar-title { font-weight: 700; font-size: 0.9rem; color: var(--muted); }
+    .history-list { display: flex; flex-direction: column; gap: 0.4rem; flex: 1; overflow-y: auto; }
+    .history-item {
+      width: 100%;
+      text-align: left;
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 9px;
+      padding: 0.55rem 0.7rem;
+      cursor: pointer;
+      font-size: 0.85rem;
+    }
+    .history-item:hover { border-color: rgba(59,130,246,0.8); background: transparent; }
+    .history-item .meta { font-size: 0.72rem; color: var(--muted); margin-top: 0.25rem; }
+
+    /* Основная область */
+    .main { flex: 1; min-width: 0; }
+    .wrap { max-width: 980px; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
+    h1 { font-size: 1.5rem; font-weight: 600; margin: 0 0 1.25rem; }
+
+    /* Счётчик запросов */
+    .request-counter {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      background: rgba(59,130,246,0.1);
+      border: 1px solid rgba(59,130,246,0.3);
+      border-radius: 20px;
+      padding: 0.3rem 0.75rem;
+      font-size: 0.82rem;
+      color: var(--accent);
+      margin-bottom: 1.25rem;
+    }
+
+    label { display: block; font-size: 0.875rem; color: var(--muted); margin-bottom: 0.35rem; }
+    textarea, select, input[type="text"], input[type="password"] {
+      width: 100%;
+      padding: 0.75rem 0.9rem;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--text);
+      font-size: 1rem;
+    }
+    textarea:focus, select:focus, input:focus { outline: none; border-color: var(--accent); }
+    textarea { min-height: 120px; resize: vertical; font-family: inherit; }
+    textarea.mermaid-editor {
+      min-height: 220px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 0.9rem;
+    }
+
+    /* Счётчик символов */
+    .char-counter {
+      font-size: 0.75rem;
+      color: var(--muted);
+      text-align: right;
+      margin-top: 0.2rem;
+    }
+    .char-counter.warn { color: #fbbf24; }
+    .char-counter.over { color: var(--danger); }
+
+    .row { display: grid; gap: 1rem; margin-bottom: 1rem; }
+    @media (min-width: 640px) { .row.two { grid-template-columns: 1fr 1fr; } }
+    @media (min-width: 640px) { .row.three { grid-template-columns: 1fr 1fr 1fr; } }
+
+    .temp-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem; }
+    input[type="range"] { flex: 1; min-width: 140px; accent-color: var(--accent); }
+
+    button {
+      padding: 0.65rem 1.25rem;
+      border: none;
+      border-radius: 8px;
+      background: var(--accent);
+      color: #fff;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    button:hover { background: var(--accent-hover); }
+    button:disabled { opacity: 0.55; cursor: not-allowed; }
+
+    .btn-small {
+      padding: 0.45rem 0.7rem;
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--text);
+      border-radius: 8px;
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 0.85rem;
+    }
+    .btn-small:hover { border-color: rgba(59,130,246,0.85); background: transparent; }
+    .btn-small:disabled { opacity: 0.55; cursor: not-allowed; }
+
+    .results { margin-top: 2rem; display: none; gap: 1.5rem; flex-direction: column; }
+    .results.visible { display: flex; }
+
+    section.card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1rem 1.15rem;
+    }
+    .card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 1rem;
+      margin-bottom: 0.75rem;
+    }
+    .card-header h2 { margin: 0; font-size: 0.95rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
+    .card-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+
+    .mermaid-wrap {
+      overflow-x: auto;
+      background: #fff;
+      border-radius: 8px;
+      padding: 1rem;
+      min-height: 220px;
+    }
+    .mermaid-wrap .mermaid { display: flex; justify-content: center; }
+
+    .code-pre {
+      margin: 0;
+      background: #0c1220;
+      border-radius: 8px;
+      overflow-x: auto;
+      font-size: 0.9rem;
+      padding: 1rem;
+    }
+    .explain-pre { margin: 0; white-space: pre-wrap; word-break: break-word; color: var(--text); }
+    .audit-pre {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      padding: 0.85rem 0.9rem;
+      border-radius: 8px;
+      background: rgba(59,130,246,0.06);
+      border: 1px solid var(--border);
+      color: var(--text);
+      min-height: 70px;
+    }
+
+    .results-actions { display: flex; gap: 0.75rem; flex-wrap: wrap; margin-top: 0.75rem; }
+
+    .spinner {
+      display: inline-block;
+      width: 16px;
+      height: 16px;
+      border: 2px solid rgba(255,255,255,0.35);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      margin-left: 0.6rem;
+      vertical-align: middle;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .error {
+      margin-top: 1rem;
+      padding: 0.9rem 1rem;
+      border-radius: 8px;
+      background: rgba(248,113,113,0.12);
+      border: 1px solid var(--danger);
+      color: var(--danger);
+      display: none;
+    }
+    .error.visible { display: block; }
+    .hint { font-size: 0.8rem; color: var(--muted); margin-top: 0.5rem; }
+  </style>
+</head>
+<body>
+
+<!-- ══════════════════════════════════════════════════════════════
+     ЭКРАН АВТОРИЗАЦИИ
+══════════════════════════════════════════════════════════════ -->
+<div id="auth_screen">
+  <div class="auth-card">
+    <h1>Генератор SQL</h1>
+    <p class="subtitle">Войдите или создайте аккаунт для работы с приложением</p>
+
+    <div class="auth-tabs">
+      <button class="auth-tab active" id="tab_login" onclick="switchTab('login')">Вход</button>
+      <button class="auth-tab" id="tab_register" onclick="switchTab('register')">Регистрация</button>
+    </div>
+
+    <!-- Форма входа -->
+    <div id="form_login">
+      <div class="auth-field">
+        <label>Email или имя пользователя</label>
+        <input type="text" id="login_login" placeholder="user@example.com" autocomplete="username" />
+      </div>
+      <div class="auth-field">
+        <label>Пароль</label>
+        <input type="password" id="login_password" placeholder="••••••••" autocomplete="current-password" />
+      </div>
+      <button class="auth-submit" id="login_btn" onclick="doLogin()">Войти</button>
+      <div class="auth-error" id="login_error"></div>
+    </div>
+
+    <!-- Форма регистрации -->
+    <div id="form_register" style="display:none">
+      <div class="auth-field">
+        <label>Имя пользователя</label>
+        <input type="text" id="reg_username" placeholder="myname" autocomplete="off" />
+      </div>
+      <div class="auth-field">
+        <label>Email</label>
+        <input type="email" id="reg_email" placeholder="user@example.com" autocomplete="email" />
+      </div>
+      <div class="auth-field">
+        <label>Пароль (минимум 6 символов)</label>
+        <input type="password" id="reg_password" placeholder="••••••••" autocomplete="new-password" />
+      </div>
+      <button class="auth-submit" id="register_btn" onclick="doRegister()">Зарегистрироваться</button>
+      <div class="auth-error" id="register_error"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════
+     ОСНОВНОЙ ИНТЕРФЕЙС
+══════════════════════════════════════════════════════════════ -->
+<div id="app_screen">
+<div class="layout">
+
+  <!-- Боковая панель -->
+  <aside class="sidebar">
+    <!-- Профиль -->
+    <div class="user-profile">
+      <div class="user-name" id="profile_name">—</div>
+      <div class="user-email" id="profile_email">—</div>
+      <div class="user-stats">Запросов: <strong id="profile_count">—</strong></div>
+      <button class="btn-logout" onclick="doLogout()">Выйти</button>
+    </div>
+
+    <div class="sidebar-title">История запросов</div>
+    <div id="history" class="history-list"></div>
+  </aside>
+
+  <!-- Основная область -->
+  <div class="main">
+  <div class="wrap">
+    <h1>Генератор SQL</h1>
+    <div class="request-counter" id="req_counter_badge" style="display:none">
+      🔢 Ваших запросов: <strong id="req_counter_val">0</strong>
+    </div>
+
+    <!-- Форма генерации -->
+    <div class="row">
+      <div>
+        <label for="user_prompt">Опишите задачу или вставьте SQL для reverse engineering</label>
+        <textarea id="user_prompt" placeholder="Например: показать всех клиентов, у которых больше 3 заказов…"></textarea>
+        <div class="char-counter" id="cc_prompt">0 / 4000</div>
+      </div>
+
+      <div class="row three">
+        <div>
+          <label for="model">Модель</label>
+          <select id="model"></select>
+        </div>
+        <div>
+          <label for="dialect">Диалект SQL</label>
+          <select id="dialect"></select>
+        </div>
+        <div>
+          <label>Температура: <span id="temp_display"></span></label>
+          <div class="temp-row">
+            <input type="range" id="temperature" min="0" max="2" step="0.1" value="0.2" />
+          </div>
+        </div>
+      </div>
+
+      <div class="row two">
+        <div>
+          <label for="existing_schema">Существующая схема (DDL) — опционально</label>
+          <textarea id="existing_schema" style="min-height:80px" placeholder="CREATE TABLE ..."></textarea>
+          <div class="char-counter" id="cc_schema">0 / 8000</div>
+        </div>
+        <div>
+          <label for="business_rules">Бизнес-правила — опционально</label>
+          <textarea id="business_rules" style="min-height:80px" placeholder="Например: один клиент может иметь несколько заказов..."></textarea>
+          <div class="char-counter" id="cc_rules">0 / 2000</div>
+        </div>
+      </div>
+
+      <button id="submit_btn" onclick="doGenerate()">
+        Сгенерировать
+        <span class="spinner" id="submit_spinner" style="display:none"></span>
+      </button>
+    </div>
+
+    <div id="error_block" class="error" role="alert"></div>
+
+    <!-- Результаты -->
+    <div id="results" class="results">
+
+      <section class="card">
+        <div class="card-header">
+          <h2>ER-диаграмма (Mermaid)</h2>
+          <div class="card-actions">
+            <button class="btn-small" id="copy_mermaid_btn" disabled>Копировать код</button>
+          </div>
+        </div>
+        <textarea class="mermaid-editor" id="mermaid_editor" placeholder="erDiagram ..."></textarea>
+        <div class="mermaid-wrap" id="diagram_host" style="margin-top:0.75rem"></div>
+      </section>
+
+      <section class="card">
+        <div class="card-header">
+          <h2>SQL</h2>
+          <div class="card-actions">
+            <button class="btn-small" id="copy_sql_btn" disabled>Копировать SQL</button>
+          </div>
+        </div>
+        <pre class="code-pre"><code id="sql_code" class="language-sql"></code></pre>
+      </section>
+
+      <section class="card">
+        <div class="card-header">
+          <h2>Логика запроса</h2>
+          <div class="card-actions">
+            <button class="btn-small" id="copy_explain_btn" disabled>Копировать</button>
+          </div>
+        </div>
+        <pre class="explain-pre" id="explain_out"></pre>
+      </section>
+
+      <div class="results-actions">
+        <button class="btn-small" id="analyze_btn" disabled>Архитектурный аудит</button>
+        <button class="btn-small" id="mock_btn" disabled>Генерировать mock data</button>
+        <button class="btn-small" id="export_btn" disabled>Экспорт .md</button>
+      </div>
+
+      <section class="card" id="audit_card" style="display:none">
+        <h2 style="font-size:0.95rem;text-transform:uppercase;letter-spacing:0.04em;color:var(--muted);margin:0 0 0.75rem">Архитектурный аудит</h2>
+        <pre class="audit-pre" id="audit_out"></pre>
+      </section>
+
+      <section class="card" id="mock_card" style="display:none">
+        <h2 style="font-size:0.95rem;text-transform:uppercase;letter-spacing:0.04em;color:var(--muted);margin:0 0 0.75rem">Mock Data (INSERT)</h2>
+        <pre class="code-pre"><code id="inserts_code" class="language-sql"></code></pre>
+        <pre class="explain-pre" id="mock_notes" style="margin-top:0.75rem;font-size:0.85rem;color:var(--muted)"></pre>
+      </section>
+
+    </div><!-- /results -->
+  </div><!-- /wrap -->
+  </div><!-- /main -->
+</div><!-- /layout -->
+</div><!-- /app_screen -->
+
+<script>
+// ═══════════════════════════════════════════════════════════════
+//  AUTH
+// ═══════════════════════════════════════════════════════════════
+let currentUser = null;
+
+function getToken() { return localStorage.getItem("jwt_token") || ""; }
+function setToken(t) { localStorage.setItem("jwt_token", t); }
+function clearToken() { localStorage.removeItem("jwt_token"); }
+
+function authHeaders() {
+  return { "Content-Type": "application/json", "Authorization": "Bearer " + getToken() };
+}
+
+function switchTab(tab) {
+  document.getElementById("form_login").style.display    = tab === "login"    ? "" : "none";
+  document.getElementById("form_register").style.display = tab === "register" ? "" : "none";
+  document.getElementById("tab_login").classList.toggle("active",    tab === "login");
+  document.getElementById("tab_register").classList.toggle("active", tab === "register");
+  document.getElementById("login_error").classList.remove("visible");
+  document.getElementById("register_error").classList.remove("visible");
+}
+
+function showAuthError(formId, msg) {
+  const el = document.getElementById(formId + "_error");
+  el.textContent = msg;
+  el.classList.add("visible");
+}
+
+async function doLogin() {
+  const btn = document.getElementById("login_btn");
+  btn.disabled = true;
+  document.getElementById("login_error").classList.remove("visible");
+  try {
+    const res = await fetch("/auth?action=login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        login:    document.getElementById("login_login").value.trim(),
+        password: document.getElementById("login_password").value,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) { showAuthError("login", data.error || "Ошибка входа"); return; }
+    setToken(data.token);
+    currentUser = data.user;
+    showApp();
+  } catch (e) {
+    showAuthError("login", "Сетевая ошибка: " + e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function doRegister() {
+  const btn = document.getElementById("register_btn");
+  btn.disabled = true;
+  document.getElementById("register_error").classList.remove("visible");
+  try {
+    const res = await fetch("/auth?action=register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        username: document.getElementById("reg_username").value.trim(),
+        email:    document.getElementById("reg_email").value.trim(),
+        password: document.getElementById("reg_password").value,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) { showAuthError("register", data.error || "Ошибка регистрации"); return; }
+    setToken(data.token);
+    currentUser = data.user;
+    showApp();
+  } catch (e) {
+    showAuthError("register", "Сетевая ошибка: " + e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function checkExistingToken() {
+  const token = getToken();
+  if (!token) return;
+  try {
+    const res = await fetch("/auth?action=me", { headers: { "Authorization": "Bearer " + token } });
+    if (!res.ok) { clearToken(); return; }
+    const data = await res.json();
+    currentUser = data.user;
+    showApp();
+  } catch {
+    clearToken();
+  }
+}
+
+function doLogout() {
+  clearToken();
+  currentUser = null;
+  document.getElementById("app_screen").style.display  = "none";
+  document.getElementById("auth_screen").style.display = "flex";
+}
+
+function showApp() {
+  document.getElementById("auth_screen").style.display = "none";
+  document.getElementById("app_screen").style.display  = "";
+  updateProfile();
+  renderHistory();
+  loadConfig();
+}
+
+function updateProfile(statsOverride) {
+  if (!currentUser) return;
+  document.getElementById("profile_name").textContent  = currentUser.username || "—";
+  document.getElementById("profile_email").textContent = currentUser.email    || "—";
+  const count = statsOverride !== undefined ? statsOverride : (currentUser.request_count ?? "—");
+  document.getElementById("profile_count").textContent = count;
+  document.getElementById("req_counter_val").textContent = count;
+  document.getElementById("req_counter_badge").style.display = "";
+}
+
+async function refreshUserStats() {
+  try {
+    const res = await fetch("/auth?action=me", { headers: { "Authorization": "Bearer " + getToken() } });
+    if (!res.ok) return;
+    const data = await res.json();
+    currentUser = data.user;
+    updateProfile(currentUser.request_count);
+  } catch { /* тихо */ }
+}
+
+// Enter в полях входа
+["login_login", "login_password"].forEach(id =>
+  document.getElementById(id).addEventListener("keydown", e => { if (e.key === "Enter") doLogin(); })
+);
+["reg_username", "reg_email", "reg_password"].forEach(id =>
+  document.getElementById(id).addEventListener("keydown", e => { if (e.key === "Enter") doRegister(); })
+);
+
+// ═══════════════════════════════════════════════════════════════
+//  КОНФИГ
+// ═══════════════════════════════════════════════════════════════
+let CONFIG = {};
+
+async function loadConfig() {
+  try {
+    const res = await fetch("/config.json");
+    CONFIG = await res.json();
+  } catch {
+    CONFIG = {
+      models:  [{ id: "gpt-4o-mini", label: "GPT-4o mini" }],
+      dialects:[{ id: "postgresql",  label: "PostgreSQL" }],
+      default_model: "gpt-4o-mini",
+      default_dialect: "postgresql",
+      temperature_default: 0.2,
+      temperature_min: 0,
+      temperature_max: 2,
+      temperature_step: 0.1,
+    };
+  }
+  initSelects();
+}
+
+function initSelects() {
+  const modelEl = document.getElementById("model");
+  const dialectEl = document.getElementById("dialect");
+  const tempEl = document.getElementById("temperature");
+
+  modelEl.innerHTML = "";
+  CONFIG.models.forEach(m => {
+    const opt = document.createElement("option");
+    opt.value = m.id; opt.textContent = m.label;
+    if (m.id === CONFIG.default_model) opt.selected = true;
+    modelEl.appendChild(opt);
+  });
+
+  dialectEl.innerHTML = "";
+  CONFIG.dialects.forEach(d => {
+    const opt = document.createElement("option");
+    opt.value = d.id; opt.textContent = d.label;
+    if (d.id === CONFIG.default_dialect) opt.selected = true;
+    dialectEl.appendChild(opt);
+  });
+
+  tempEl.min   = CONFIG.temperature_min;
+  tempEl.max   = CONFIG.temperature_max;
+  tempEl.step  = CONFIG.temperature_step;
+  tempEl.value = CONFIG.temperature_default;
+  syncTempLabel();
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  UI УТИЛИТЫ
+// ═══════════════════════════════════════════════════════════════
+const CHAR_LIMITS = { user_prompt: 4000, existing_schema: 8000, business_rules: 2000 };
+
+function setupCharCounter(textareaId, counterId, limit) {
+  const ta = document.getElementById(textareaId);
+  const cc = document.getElementById(counterId);
+  function update() {
+    const len = ta.value.length;
+    cc.textContent = len + " / " + limit;
+    cc.className = "char-counter" + (len > limit ? " over" : len > limit * 0.85 ? " warn" : "");
+  }
+  ta.addEventListener("input", update);
+  update();
+}
+
+setupCharCounter("user_prompt",     "cc_prompt", CHAR_LIMITS.user_prompt);
+setupCharCounter("existing_schema", "cc_schema", CHAR_LIMITS.existing_schema);
+setupCharCounter("business_rules",  "cc_rules",  CHAR_LIMITS.business_rules);
+
+function syncTempLabel() {
+  document.getElementById("temp_display").textContent =
+    Number(document.getElementById("temperature").value).toFixed(1);
+}
+document.getElementById("temperature").addEventListener("input", syncTempLabel);
+
+function showError(msg) {
+  const el = document.getElementById("error_block");
+  el.textContent = msg; el.classList.add("visible");
+}
+function hideError() {
+  const el = document.getElementById("error_block");
+  el.classList.remove("visible"); el.textContent = "";
+}
+
+function setControlsEnabled(enabled) {
+  ["analyze_btn","mock_btn","export_btn","copy_mermaid_btn","copy_sql_btn","copy_explain_btn"]
+    .forEach(id => { document.getElementById(id).disabled = !enabled; });
+}
+
+function highlightSqlCode(el) { if (window.Prism) Prism.highlightElement(el); }
+
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); }
+  catch { prompt("Скопируйте вручную:", text); }
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  MERMAID
+// ═══════════════════════════════════════════════════════════════
+let mermaidDebounceTimer = null;
+let suppressMermaidInput = false;
+
+async function renderMermaid(code) {
+  const diagramHost = document.getElementById("diagram_host");
+  const clean = (code || "").trim();
+  diagramHost.innerHTML = "";
+  if (!clean) {
+    diagramHost.innerHTML = "<p style='color:#666;margin:0;padding:1rem'>Диаграмма не сгенерирована.</p>";
+    return;
+  }
+  const el = document.createElement("div");
+  el.className = "mermaid";
+  el.textContent = clean;
+  diagramHost.appendChild(el);
+  const mm = window.__mermaid;
+  if (!mm) { diagramHost.innerHTML = "<p style='color:#c00'>Mermaid не загрузился.</p>"; return; }
+  try { await mm.run({ nodes: [el] }); }
+  catch (e) {
+    diagramHost.innerHTML = "";
+    const pre = document.createElement("pre");
+    pre.className = "code-pre";
+    pre.textContent = "Ошибка отрисовки Mermaid:\n" + e + "\n\n" + clean;
+    diagramHost.appendChild(pre);
+  }
+}
+
+async function setMermaidFromModel(code) {
+  suppressMermaidInput = true;
+  document.getElementById("mermaid_editor").value = code || "";
+  suppressMermaidInput = false;
+  await renderMermaid(code);
+}
+
+document.getElementById("mermaid_editor").addEventListener("input", () => {
+  if (suppressMermaidInput) return;
+  clearTimeout(mermaidDebounceTimer);
+  mermaidDebounceTimer = setTimeout(() => renderMermaid(document.getElementById("mermaid_editor").value), 500);
+});
+
+// ═══════════════════════════════════════════════════════════════
+//  ИСТОРИЯ
+// ═══════════════════════════════════════════════════════════════
+let currentHistoryId = null;
+
+function loadHistory() {
+  try { return JSON.parse(localStorage.getItem("sql_history_v2") || "[]"); }
+  catch { return []; }
+}
+function saveHistory(list) {
+  localStorage.setItem("sql_history_v2", JSON.stringify(list.slice(0, 30)));
+}
+
+function renderHistory() {
+  const historyEl = document.getElementById("history");
+  const list = loadHistory();
+  historyEl.innerHTML = "";
+  list.forEach(item => {
+    const btn = document.createElement("button");
+    btn.className = "history-item";
+    const preview = (item.input?.user_prompt || "").slice(0, 55);
+    const date = new Date(item.ts).toLocaleString("ru");
+    btn.innerHTML = `<div>${preview}…</div><div class="meta">${date}</div>`;
+    btn.addEventListener("click", () => restoreHistoryItem(item));
+    historyEl.appendChild(btn);
+  });
+}
+
+async function restoreHistoryItem(item) {
+  currentHistoryId = item.id;
+  document.getElementById("user_prompt").value      = item?.input?.user_prompt || "";
+  document.getElementById("temperature").value      = item?.input?.temperature ?? document.getElementById("temperature").value;
+  syncTempLabel();
+  document.getElementById("model").value            = item?.input?.model   || document.getElementById("model").value;
+  document.getElementById("dialect").value          = item?.input?.dialect || document.getElementById("dialect").value;
+  document.getElementById("existing_schema").value  = item?.input?.existing_schema || "";
+  document.getElementById("business_rules").value   = item?.input?.business_rules  || "";
+
+  const out = item?.output || {};
+  document.getElementById("sql_code").textContent  = out.sql || "";
+  highlightSqlCode(document.getElementById("sql_code"));
+  document.getElementById("explain_out").textContent = out.explanation || "";
+  document.getElementById("audit_out").textContent   = item?.audit || "";
+  document.getElementById("audit_card").style.display = item?.audit ? "block" : "none";
+
+  document.getElementById("results").classList.add("visible");
+  setControlsEnabled(true);
+  await setMermaidFromModel(out.er_diagram || "");
+
+  if (out.inserts) {
+    document.getElementById("mock_card").style.display = "block";
+    document.getElementById("inserts_code").textContent = out.inserts;
+    highlightSqlCode(document.getElementById("inserts_code"));
+    document.getElementById("mock_notes").textContent = out.mock_notes || "";
+  } else {
+    document.getElementById("mock_card").style.display = "none";
+  }
+}
+
+function upsertHistoryPatch(id, patch) {
+  if (!id) return;
+  const list = loadHistory();
+  const idx = list.findIndex(x => x.id === id);
+  if (idx === -1) return;
+  list[idx] = { ...list[idx], ...patch };
+  saveHistory(list); renderHistory();
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  COPY КНОПКИ
+// ═══════════════════════════════════════════════════════════════
+document.getElementById("copy_mermaid_btn").addEventListener("click", () =>
+  copyText(document.getElementById("mermaid_editor").value));
+document.getElementById("copy_sql_btn").addEventListener("click", () =>
+  copyText(document.getElementById("sql_code").textContent));
+document.getElementById("copy_explain_btn").addEventListener("click", () =>
+  copyText(document.getElementById("explain_out").textContent));
+
+// ═══════════════════════════════════════════════════════════════
+//  АРХИТЕКТУРНЫЙ АУДИТ
+// ═══════════════════════════════════════════════════════════════
+document.getElementById("analyze_btn").addEventListener("click", async () => {
+  const btn = document.getElementById("analyze_btn");
+  try {
+    btn.disabled = true;
+    const res = await fetch("/analyze_architecture", {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({
+        mermaid_er:  document.getElementById("mermaid_editor").value,
+        dialect:     document.getElementById("dialect").value,
+        sql:         document.getElementById("sql_code").textContent,
+        model:       document.getElementById("model").value,
+        temperature: parseFloat(document.getElementById("temperature").value),
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (res.status === 401) { doLogout(); return; }
+    if (!res.ok) throw new Error(data.error || `Ошибка сервера (${res.status})`);
+
+    document.getElementById("audit_out").textContent = data.audit || "";
+    document.getElementById("audit_card").style.display = "block";
+    upsertHistoryPatch(currentHistoryId, { audit: data.audit });
+    await refreshUserStats();
+  } catch (e) {
+    showError("Ошибка анализа: " + e.message);
+  } finally {
+    setControlsEnabled(true);
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════
+//  MOCK DATA
+// ═══════════════════════════════════════════════════════════════
+document.getElementById("mock_btn").addEventListener("click", async () => {
+  const btn = document.getElementById("mock_btn");
+  try {
+    btn.disabled = true;
+    const res = await fetch("/generate_mock_data", {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({
+        mermaid_er:  document.getElementById("mermaid_editor").value,
+        dialect:     document.getElementById("dialect").value,
+        model:       document.getElementById("model").value,
+        temperature: parseFloat(document.getElementById("temperature").value),
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (res.status === 401) { doLogout(); return; }
+    if (!res.ok) throw new Error(data.error || `Ошибка сервера (${res.status})`);
+
+    document.getElementById("inserts_code").textContent = data.inserts || "";
+    highlightSqlCode(document.getElementById("inserts_code"));
+    document.getElementById("mock_notes").textContent = data.notes || "";
+    document.getElementById("mock_card").style.display = "block";
+
+    const history = loadHistory();
+    const item = history.find(x => x.id === currentHistoryId);
+    if (item) {
+      item.output = { ...item.output, inserts: data.inserts, mock_notes: data.notes };
+      saveHistory(history);
+    }
+    await refreshUserStats();
+  } catch (e) {
+    showError("Ошибка mock data: " + e.message);
+  } finally {
+    setControlsEnabled(true);
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════
+//  ЭКСПОРТ MD
+// ═══════════════════════════════════════════════════════════════
+document.getElementById("export_btn").addEventListener("click", () => {
+  const mermaid = document.getElementById("mermaid_editor").value || "";
+  const sql     = document.getElementById("sql_code").textContent || "";
+  const audit   = document.getElementById("audit_out").textContent || "";
+  const md =
+    `# SQL Generator Output\n\n` +
+    `## ER Diagram (Mermaid)\n\`\`\`mermaid\n${mermaid}\n\`\`\`\n\n` +
+    `## SQL\n\`\`\`sql\n${sql}\n\`\`\`\n\n` +
+    `## Архитектурный аудит\n\n${audit || "_(аудит не выполнен)_"}\n`;
+  const blob = new Blob([md], { type: "text/markdown;charset=utf-8" });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement("a");
+  a.href = url; a.download = `sql-export-${new Date().toISOString().slice(0,10)}.md`;
+  document.body.appendChild(a); a.click();
+  document.body.removeChild(a); URL.revokeObjectURL(url);
+});
+
+// ═══════════════════════════════════════════════════════════════
+//  ОСНОВНАЯ ГЕНЕРАЦИЯ
+// ═══════════════════════════════════════════════════════════════
+async function doGenerate() {
+  hideError();
+  const submitBtn = document.getElementById("submit_btn");
+  const submitSpinner = document.getElementById("submit_spinner");
+  submitBtn.disabled = true;
+  submitSpinner.style.display = "inline-block";
+  document.getElementById("results").classList.remove("visible");
+  document.getElementById("mock_card").style.display  = "none";
+  document.getElementById("audit_card").style.display = "none";
+  document.getElementById("audit_out").textContent    = "";
+  document.getElementById("inserts_code").textContent = "";
+
+  const userPromptVal = document.getElementById("user_prompt").value;
+  if (!userPromptVal.trim()) {
+    showError("Введите текст запроса.");
+    submitBtn.disabled = false; submitSpinner.style.display = "none";
+    return;
+  }
+
+  try {
+    const res = await fetch("/generate", {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({
+        user_prompt:     userPromptVal,
+        temperature:     parseFloat(document.getElementById("temperature").value),
+        model:           document.getElementById("model").value,
+        dialect:         document.getElementById("dialect").value,
+        existing_schema: document.getElementById("existing_schema").value,
+        business_rules:  document.getElementById("business_rules").value,
+      }),
+    });
+
+    const data = await res.json().catch(() => ({}));
+    if (res.status === 401) { doLogout(); return; }
+    if (!res.ok) { showError(data.error || `Ошибка сервера (${res.status})`); return; }
+
+    const er          = (data.er_diagram || "").trim();
+    const sql         = data.sql || "";
+    const explanation = data.explanation || "";
+
+    document.getElementById("sql_code").textContent  = sql;
+    highlightSqlCode(document.getElementById("sql_code"));
+    document.getElementById("explain_out").textContent = explanation;
+
+    await setMermaidFromModel(er);
+    document.getElementById("results").classList.add("visible");
+    setControlsEnabled(true);
+
+    const entry = {
+      id:    String(Date.now()),
+      ts:    new Date().toISOString(),
+      input: {
+        user_prompt:     userPromptVal,
+        temperature:     parseFloat(document.getElementById("temperature").value),
+        model:           document.getElementById("model").value,
+        dialect:         document.getElementById("dialect").value,
+        existing_schema: document.getElementById("existing_schema").value,
+        business_rules:  document.getElementById("business_rules").value,
+      },
+      output: { er_diagram: er, sql, explanation },
+      audit: "",
+    };
+    const history = loadHistory();
+    history.unshift(entry);
+    saveHistory(history);
+    currentHistoryId = entry.id;
+    renderHistory();
+
+    await refreshUserStats();
+  } catch (err) {
+    showError("Сеть или браузер: " + err);
+  } finally {
+    submitBtn.disabled = false;
+    submitSpinner.style.display = "none";
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  ИНИЦИАЛИЗАЦИЯ
+// ═══════════════════════════════════════════════════════════════
+document.getElementById("mock_card").style.display  = "none";
+document.getElementById("audit_card").style.display = "none";
+document.getElementById("results").classList.remove("visible");
+setControlsEnabled(false);
+
+// Проверяем токен при загрузке
+checkExistingToken();
+</script>
+</body>
+</html>
