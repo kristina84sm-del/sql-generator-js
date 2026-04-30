@@ -611,12 +611,15 @@ function doLogout() {
 
 function showApp() {
   document.getElementById("auth_screen").style.display = "none";
-  document.getElementById("app_screen").style.display  = "";
-  updateProfile();
-  renderHistory();
-  loadConfig();
+  document.getElementById("app_screen").style.display  = "block";
+  try {
+    updateProfile();
+    renderHistory();
+    loadConfig();
+  } catch (err) {
+    console.error("Данные не загрузились, но интерфейс открыт:", err);
+  }
 }
-
 function updateProfile(statsOverride) {
   if (!currentUser) return;
   document.getElementById("profile_name").textContent  = currentUser.username || "—";
