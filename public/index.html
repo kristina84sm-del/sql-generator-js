@@ -782,7 +782,9 @@ async function setMermaidFromModel(code) {
   suppressMermaidInput = true;
   document.getElementById("mermaid_editor").value = code || "";
   suppressMermaidInput = false;
-  await renderMermaid(code);
+  setTimeout(async () => {
+    await renderMermaid(code);
+  }, 200);
 }
 
 document.getElementById("mermaid_editor").addEventListener("input", () => {
