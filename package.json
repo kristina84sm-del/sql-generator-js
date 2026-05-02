@@ -4,7 +4,7 @@
   "description": "SQL Generator with user accounts",
   "private": true,
   "dependencies": {
-    "pg": "^8.11.3"
+    "pg": "^8.20.0"
   },
   "engines": {
     "node": ">=18"
