@@ -86,9 +86,27 @@ async function ensureSchema(client) {
       explanation TEXT,
       audit_result TEXT,
       inserts_result TEXT,
+      tokens_used INTEGER,
       created_at  TIMESTAMPTZ DEFAULT NOW()
     );
+    CREATE TABLE IF NOT EXISTS auth_sessions (
+      id          SERIAL PRIMARY KEY,
+      user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      expires_at  TIMESTAMPTZ NOT NULL,
+      revoked_at  TIMESTAMPTZ,
+      user_agent  TEXT,
+      ip_address  VARCHAR(64),
+      created_at  TIMESTAMPTZ DEFAULT NOW()
+    );
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN NOT NULL DEFAULT FALSE;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS daily_request_limit INTEGER;
     ALTER TABLE query_history ALTER COLUMN dialect TYPE VARCHAR(64);
+    ALTER TABLE query_history ADD COLUMN IF NOT EXISTS tokens_used INTEGER;
+    ALTER TABLE auth_sessions ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
+    ALTER TABLE auth_sessions ADD COLUMN IF NOT EXISTS revoked_at TIMESTAMPTZ;
+    ALTER TABLE auth_sessions ADD COLUMN IF NOT EXISTS user_agent TEXT;
+    ALTER TABLE auth_sessions ADD COLUMN IF NOT EXISTS ip_address VARCHAR(64);
   `);
 }
 
