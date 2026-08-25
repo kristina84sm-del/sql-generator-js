@@ -2,6 +2,12 @@
   publish = "public"
   functions = "netlify/functions"
 
+  [functions]
+  node_bundler = "esbuild"
+
+[functions."*"]
+  timeout = 120
+
 [[redirects]]
   from = "/auth"
   to = "/.netlify/functions/auth"
@@ -22,6 +28,33 @@
   to = "/.netlify/functions/generate_mock_data"
   status = 200
 
+[[redirects]]
+  from = "/generate_sql_tests"
+  to = "/.netlify/functions/generate_sql_tests"
+  status = 200
+
+[[redirects]]
+  from = "/split_service"
+  to = "/.netlify/functions/split_service"
+  status = 200
+
+[[redirects]]
+  from = "/history"
+  to = "/.netlify/functions/history"
+  status = 200
+
+[[redirects]]
+   from = "/generate_migration"
+   to = "/.netlify/functions/generate_migration"
+   status = 200
+
+[[redirects]]
+  from = "/admin_panel"
+  to = "/.netlify/functions/admin_panel"
+  status = 200
+  
 [dev]
   framework = "#static"
   port = 8888
+
+  

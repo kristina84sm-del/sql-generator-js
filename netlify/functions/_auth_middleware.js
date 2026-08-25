@@ -1,13 +1,14 @@
-// Общий модуль: проверка JWT + логирование запросов в БД
-// Используется в generate.js, analyze_architecture.js, generate_mock_data.js
-
+// netlify/functions/_auth_middleware.js
+// Проверка JWT + проверка отзыва сессии в БД + логирование запросов
+ 
 const crypto = require("crypto");
-const { Client } = require("pg");
-
+const { getClient } = require("./_db");
+const { trackError } = require("./_log");
+ 
 function base64url(buf) {
   return buf.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
 }
-
+ 
 function verifyToken(token, secret) {
   try {
     const [header, body, sig] = token.split(".");
@@ -22,42 +23,73 @@ function verifyToken(token, secret) {
     return null;
   }
 }
-
-/**
- * Проверяет Authorization: Bearer <token>
- * Возвращает { ok, user } или { ok: false, error }
- */
-function checkAuth(event) {
+ 
+// Проверяет в БД, не отозвана ли и не истекла ли сессия с данным sid.
+// Fail-open: если БД временно недоступна — не блокируем пользователя,
+// чтобы сбой инфраструктуры не положил весь сервис целиком.
+async function isSessionValid(sid) {
+  if (!process.env.DATABASE_URL) return true;
+  let client;
+  try {
+    client = await getClient();
+    const { rows } = await client.query(
+      "SELECT revoked_at, expires_at FROM auth_sessions WHERE id = $1",
+      [sid]
+    );
+    if (rows.length === 0) return false;
+    if (rows[0].revoked_at) return false;
+    if (rows[0].expires_at && new Date(rows[0].expires_at) < new Date()) return false;
+    return true;
+  } catch (e) {
+    trackError("isSessionValid", e);
+    return true;
+  } finally {
+    if (client) await client.end().catch(() => {});
+  }
+}
+ 
+async function checkAuth(event) {
   const jwtSecret = process.env.JWT_SECRET;
   if (!jwtSecret) return { ok: false, error: "JWT_SECRET не задан" };
-
-  const authHeader = event.headers["authorization"] || event.headers["Authorization"] || "";
-  const token = authHeader.replace(/^Bearer\s+/i, "").trim();
+ 
+  let token = null;
+  const cookieHeader = event.headers.cookie || event.headers.Cookie || "";
+  const match = cookieHeader.match(/token=([^;]+)/);
+  if (match) token = match[1];
+ 
+  if (!token) {
+    const authHeader = event.headers["authorization"] || event.headers["Authorization"] || "";
+    token = authHeader.replace(/^Bearer\s+/i, "").trim();
+  }
+ 
   if (!token) return { ok: false, error: "Требуется авторизация. Войдите в систему." };
-
+ 
   const payload = verifyToken(token, jwtSecret);
   if (!payload) return { ok: false, error: "Токен недействителен или истёк. Войдите снова." };
-
+ 
+  // КЛЮЧЕВОЕ ОТЛИЧИЕ ОТ СТАРОЙ ВЕРСИИ: проверяем, не отозвана ли сессия
+  if (payload.sid) {
+    const valid = await isSessionValid(payload.sid);
+    if (!valid) return { ok: false, error: "Сессия завершена. Войдите снова." };
+  }
+ 
   return { ok: true, user: payload };
 }
-
-/**
- * Записывает запрос в request_log (без бросания ошибки — логирование не блокирует)
- */
+ 
 async function logRequest(userId, endpoint) {
   if (!process.env.DATABASE_URL) return;
-  const client = new Client({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
+  let client;
   try {
-    await client.connect();
+    client = await getClient();
     await client.query(
       "INSERT INTO request_log (user_id, endpoint) VALUES ($1, $2)",
       [userId, endpoint]
     );
   } catch (e) {
-    console.error("logRequest error:", e.message);
+    trackError("logRequest", e);
   } finally {
-    await client.end();
+    if (client) await client.end().catch(() => {});
   }
 }
-
+ 
 module.exports = { checkAuth, logRequest };

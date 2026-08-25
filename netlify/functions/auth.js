@@ -3,8 +3,9 @@
 // POST /auth?action=login     — вход
 // GET  /auth?action=me        — проверка токена
 
-const { Client } = require("pg");
 const crypto = require("crypto");
+const { getClient } = require("./_db");
+const { publicDbError, trackError } = require("./_log");
 
 const CORS = {
   "Content-Type": "application/json",
@@ -55,21 +56,17 @@ function checkPassword(password, storedHash, salt) {
 }
 
 // ─── БД: инициализация схемы ───────────────────────────────────────────────
-async function getClient() {
-  const client = new Client({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
-  await client.connect();
-  return client;
-}
-
 async function ensureSchema(client) {
   await client.query(`
     CREATE TABLE IF NOT EXISTS users (
-      id          SERIAL PRIMARY KEY,
-      username    VARCHAR(64) UNIQUE NOT NULL,
-      email       VARCHAR(255) UNIQUE NOT NULL,
-      password_hash VARCHAR(64) NOT NULL,
-      salt        VARCHAR(32) NOT NULL,
-      created_at  TIMESTAMPTZ DEFAULT NOW()
+      id              SERIAL PRIMARY KEY,
+      username        VARCHAR(64) UNIQUE NOT NULL,
+      email           VARCHAR(255) UNIQUE NOT NULL,
+      password_hash   VARCHAR(64) NOT NULL,
+      salt            VARCHAR(32) NOT NULL,
+      privacy_consent BOOLEAN NOT NULL DEFAULT FALSE,
+      consent_date    TIMESTAMPTZ,
+      created_at      TIMESTAMPTZ DEFAULT NOW()
     );
     CREATE TABLE IF NOT EXISTS request_log (
       id          SERIAL PRIMARY KEY,
@@ -77,14 +74,31 @@ async function ensureSchema(client) {
       endpoint    VARCHAR(64),
       created_at  TIMESTAMPTZ DEFAULT NOW()
     );
+    CREATE TABLE IF NOT EXISTS query_history (
+      id          SERIAL PRIMARY KEY,
+      user_id     INTEGER REFERENCES users(id) ON DELETE CASCADE,
+      tab         VARCHAR(32),
+      dialect     VARCHAR(64),
+      user_prompt TEXT,
+      sql_result  TEXT,
+      ddl_result  TEXT,
+      er_diagram  TEXT,
+      explanation TEXT,
+      audit_result TEXT,
+      inserts_result TEXT,
+      created_at  TIMESTAMPTZ DEFAULT NOW()
+    );
+    ALTER TABLE query_history ALTER COLUMN dialect TYPE VARCHAR(64);
   `);
 }
 
 // ─── Обработчики ───────────────────────────────────────────────────────────
-async function handleRegister(body, jwtSecret) {
-  const username = (body.username || "").trim();
-  const email    = (body.email || "").trim().toLowerCase();
-  const password = (body.password || "").trim();
+async function handleRegister(body, jwtSecret, userAgent, ipAddress) {
+  const username        = (body.username || "").trim();
+  const email           = (body.email || "").trim().toLowerCase();
+  const password        = (body.password || "").trim();
+  // 1. Забираем флаг согласия, который прилетает с фронтенда
+  const privacy_consent = !!body.privacy_consent; 
 
   if (!username || !email || !password)
     return { statusCode: 400, body: { error: "Заполните все поля: username, email, password" } };
@@ -94,17 +108,31 @@ async function handleRegister(body, jwtSecret) {
     return { statusCode: 400, body: { error: "Пароль должен содержать минимум 6 символов" } };
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email))
     return { statusCode: 400, body: { error: "Некорректный email" } };
+  
+  // 2. Проверка согласия: если чекбокс не прожит, бэкенд не пустит запрос дальше
+  if (!privacy_consent)
+    return { statusCode: 400, body: { error: "Необходимо дать согласие на обработку персональных данных" } };
 
   const client = await getClient();
   try {
     await ensureSchema(client);
     const { hash, salt } = hashPassword(password);
+    
+    // 3. Модифицируем SQL-запрос: добавляем колонки и плейсхолдер $5 для Amvera
     const res = await client.query(
-      "INSERT INTO users (username, email, password_hash, salt) VALUES ($1, $2, $3, $4) RETURNING id, username, email",
-      [username, email, hash, salt]
+      `INSERT INTO users (username, email, password_hash, salt, privacy_consent, consent_date) 
+       VALUES ($1, $2, $3, $4, $5, NOW()) 
+       RETURNING id, username, email`,
+      [username, email, hash, salt, privacy_consent] // Передаем флаг пятым параметром
     );
+    
     const user = res.rows[0];
-    const token = signToken({ sub: user.id, username: user.username, exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 7 }, jwtSecret);
+    const sessionRes = await client.query(
+      `INSERT INTO auth_sessions (user_id, expires_at, user_agent, ip_address) VALUES ($1, NOW() + INTERVAL '7 days', $2, $3) RETURNING id`,
+      [user.id, userAgent, ipAddress]
+    );
+    const sid = sessionRes.rows[0].id;
+    const token = signToken({ sub: user.id, username: user.username, sid, exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 7 }, jwtSecret);
     return { statusCode: 201, body: { token, user: { id: user.id, username: user.username, email: user.email } } };
   } catch (e) {
     if (e.code === "23505") {
@@ -116,8 +144,7 @@ async function handleRegister(body, jwtSecret) {
     await client.end();
   }
 }
-
-async function handleLogin(body, jwtSecret) {
+async function handleLogin(body, jwtSecret, userAgent, ipAddress) {
   const login    = (body.login || "").trim().toLowerCase();   // email или username
   const password = (body.password || "").trim();
 
@@ -128,7 +155,7 @@ async function handleLogin(body, jwtSecret) {
   try {
     await ensureSchema(client);
     const res = await client.query(
-      "SELECT id, username, email, password_hash, salt FROM users WHERE email=$1 OR username=$1",
+      "SELECT id, username, email, password_hash, salt FROM users WHERE (email=$1 OR username=$1) AND deleted_at IS NULL",
       [login]
     );
     if (res.rows.length === 0)
@@ -138,16 +165,25 @@ async function handleLogin(body, jwtSecret) {
     if (!checkPassword(password, user.password_hash, user.salt))
       return { statusCode: 401, body: { error: "Неверный логин или пароль" } };
 
-    const token = signToken({ sub: user.id, username: user.username, exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 7 }, jwtSecret);
-    return { statusCode: 200, body: { token, user: { id: user.id, username: user.username, email: user.email } } };
+    const sessionRes = await client.query(
+      `INSERT INTO auth_sessions (user_id, expires_at, user_agent, ip_address) VALUES ($1, NOW() + INTERVAL '7 days', $2, $3) RETURNING id`,
+      [user.id, userAgent, ipAddress]
+    );
+    const sid = sessionRes.rows[0].id;
+    const token = signToken({ sub: user.id, username: user.username, sid, exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 7 }, jwtSecret);
+    return {
+      statusCode: 200,
+      token: token, // Прокидываем наружу для заголовков
+      body: { user: { id: user.id, username: user.username, email: user.email } }
+    };
   } finally {
     await client.end();
   }
 }
 
-async function handleMe(authHeader, jwtSecret) {
-  const token = (authHeader || "").replace(/^Bearer\s+/i, "");
-  if (!token) return { statusCode: 401, body: { error: "Токен не передан" } };
+async function handleMe(token, jwtSecret) {
+  // Переменную authHeader переименовываем в token внутри параметров функции
+if (!token || token === "undefined") return { statusCode: 401, body: { error: "Токен не передан или пустой" } };
   const payload = verifyToken(token, jwtSecret);
   if (!payload) return { statusCode: 401, body: { error: "Токен недействителен или истёк" } };
 
@@ -155,11 +191,13 @@ async function handleMe(authHeader, jwtSecret) {
   try {
     await ensureSchema(client);
     const res = await client.query(
-      `SELECT u.id, u.username, u.email, u.created_at,
-              COUNT(r.id)::int AS request_count
+      `SELECT u.id, u.username, u.email, u.created_at, u.is_admin,
+              COUNT(DISTINCT r.id)::int AS request_count,
+              COALESCE(SUM(q.tokens_used), 0)::int AS tokens_total
        FROM users u
        LEFT JOIN request_log r ON r.user_id = u.id
-       WHERE u.id = $1
+       LEFT JOIN query_history q ON q.user_id = u.id
+       WHERE u.id = $1 AND u.deleted_at IS NULL
        GROUP BY u.id`,
       [payload.sub]
     );
@@ -172,38 +210,206 @@ async function handleMe(authHeader, jwtSecret) {
 
 // ─── Главный обработчик ────────────────────────────────────────────────────
 exports.handler = async (event) => {
-  if (event.httpMethod === "OPTIONS") return { statusCode: 200, headers: CORS, body: "" };
+  // 1. Извлекаем origin динамически (это критически важно для работы кук!)
+  const currentOrigin = event.headers.origin || event.headers.Origin || "*";
+
+  // Обработка CORS предзапроса
+  if (event.httpMethod === "OPTIONS") {
+    return {
+      statusCode: 200,
+      headers: {
+        "Access-Control-Allow-Origin": currentOrigin,
+        "Access-Control-Allow-Headers": "Content-Type, Authorization, Cookie",
+        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+        "Access-Control-Allow-Credentials": "true"
+      },
+      body: ""
+    };
+  }
 
   const jwtSecret = process.env.JWT_SECRET;
-  if (!jwtSecret)
-    return { statusCode: 500, headers: CORS, body: JSON.stringify({ error: "JWT_SECRET не задан в переменных окружения" }) };
+  if (!jwtSecret || !process.env.DATABASE_URL) {
+    return { 
+      statusCode: 500, 
+      headers: { 
+        "Content-Type": "application/json", 
+        "Access-Control-Allow-Origin": currentOrigin,
+        "Access-Control-Allow-Credentials": "true"
+      }, 
+      body: JSON.stringify({ error: "Переменные окружения не заданы" }) 
+    };
+  }
 
-  if (!process.env.DATABASE_URL)
-    return { statusCode: 500, headers: CORS, body: JSON.stringify({ error: "DATABASE_URL не задан в переменных окружения" }) };
+  // Идеальный парсинг токена (работает и для одной куки, и для нескольких)
+  const cookieHeader = event.headers.cookie || event.headers.Cookie || "";
+  const match = cookieHeader.match(/token=([^;]+)/);
+  const token = match ? match[1] : (event.headers.authorization ? event.headers.authorization.split(" ")[1] : null);
 
   const action = (event.queryStringParameters?.action || "").toLowerCase();
 
   try {
     let result;
 
+    // Маршрутизация экшенов
     if (action === "register" && event.httpMethod === "POST") {
       const body = JSON.parse(event.body || "{}");
-      result = await handleRegister(body, jwtSecret);
+      const ua = event.headers['user-agent'] || event.headers['User-Agent'] || null;
+      const ip = (event.headers['x-forwarded-for'] || "").split(',')[0].trim() || null;
+      result = await handleRegister(body, jwtSecret, ua, ip);
 
     } else if (action === "login" && event.httpMethod === "POST") {
       const body = JSON.parse(event.body || "{}");
-      result = await handleLogin(body, jwtSecret);
+      const ua = event.headers['user-agent'] || event.headers['User-Agent'] || null;
+      const ip = (event.headers['x-forwarded-for'] || "").split(',')[0].trim() || null;
+      result = await handleLogin(body, jwtSecret, ua, ip);
 
     } else if (action === "me" && event.httpMethod === "GET") {
-      result = await handleMe(event.headers["authorization"] || event.headers["Authorization"], jwtSecret);
+      // ИСПРАВЛЕНО: Больше не парсим заново куку! Используем готовую переменную token из строки 34
+      result = await handleMe(token, jwtSecret);
 
+   
+    } else if (action === "logout") {
+      if (token) {
+        const payload = verifyToken(token, jwtSecret);
+        if (payload && payload.sid) {
+          const client = await getClient();
+          try {
+            await client.query("UPDATE auth_sessions SET revoked_at = NOW() WHERE id = $1", [payload.sid]);
+          } catch (e) {
+            console.error("logout revoke error:", e.message);
+          } finally {
+            await client.end();
+          }
+        }
+      }
+      result = { statusCode: 200, body: { success: true } };
+    } else if (action === "delete_account" && event.httpMethod === "POST") {
+      if (!token) {
+        result = { statusCode: 401, body: { error: "Требуется авторизация" } };
+      } else {
+        const payload = verifyToken(token, jwtSecret);
+        if (!payload) {
+          result = { statusCode: 401, body: { error: "Токен недействителен или истёк" } };
+        } else {
+          const body2 = JSON.parse(event.body || "{}");
+          const password2 = (body2.password || "").trim();
+          if (!password2) {
+            result = { statusCode: 400, body: { error: "Введите пароль для подтверждения" } };
+          } else {
+            const client2 = await getClient();
+            try {
+              const userRes = await client2.query(
+                "SELECT password_hash, salt FROM users WHERE id = $1 AND deleted_at IS NULL",
+                [payload.sub]
+              );
+              if (!userRes.rows.length) {
+                result = { statusCode: 404, body: { error: "Пользователь не найден" } };
+              } else {
+                const { password_hash, salt } = userRes.rows[0];
+                if (!checkPassword(password2, password_hash, salt)) {
+                  result = { statusCode: 403, body: { error: "Неверный пароль. Удаление отменено." } };
+                } else {
+                  // Мягкое удаление: анонимизируем ПДн, статистика сохраняется
+                  await client2.query(`
+                    UPDATE users SET
+                      username      = 'deleted_' || id::text,
+                      email         = 'deleted_' || id::text || '@deleted.local',
+                      password_hash = 'DELETED',
+                      salt          = 'DELETED',
+                      deleted_at    = NOW()
+                    WHERE id = $1
+                  `, [payload.sub]);
+                  // Сессии удаляем — вход заблокирован
+                  await client2.query(
+                    "DELETE FROM auth_sessions WHERE user_id = $1",
+                    [payload.sub]
+                  );
+                  // query_history и request_log оставляем — они анонимизированы
+                  // (пользователь = 'deleted_N', войти невозможно)
+                  result = { statusCode: 200, body: { ok: true } };
+                }
+              }
+            } catch (e) {
+              console.error("delete_account error:", e);
+              result = { statusCode: 500, body: { error: "Ошибка при удалении: " + e.message } };
+            } finally {
+              await client2.end();
+            }
+          }
+        }
+      }
+    } else if (action === "complete_onboarding" && event.httpMethod === "POST") {
+      if (!token) {
+        result = { statusCode: 401, body: { error: "Нет доступа" } };
+      } else {
+        const payload = verifyToken(token, jwtSecret);
+        if (!payload) {
+          result = { statusCode: 401, body: { error: "Неверный токен" } };
+        } else {
+          const client = await getClient();
+          try {
+            await client.query("UPDATE users SET is_new_user = FALSE WHERE id = $1", [payload.sub]);
+            result = { statusCode: 200, body: { status: "ok" } };
+          } finally {
+            await client.end();
+          }
+        }
+      }
+      
     } else {
       result = { statusCode: 400, body: { error: "Неверный action или метод" } };
     }
 
-    return { statusCode: result.statusCode, headers: CORS, body: JSON.stringify(result.body) };
+    // Базовые CORS заголовки (С динамическим Origin для кук)
+    const responseHeaders = {
+      "Content-Type": "application/json",
+      "Access-Control-Allow-Origin": currentOrigin,
+      "Access-Control-Allow-Credentials": "true",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization, Cookie",
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    };
+
+    // Установка куки при успешном входе или регистрации
+    // ИСПРАВЛЕНО: Ищем токен и в result.token, и в result.body.token для надежности
+    if ((action === "login" || action === "register") && (result.statusCode === 200 || result.statusCode === 201)) {
+      const extractedToken = result.token || result.body?.token;
+      
+      if (extractedToken) {
+        // Чистим токен из тела ответа
+        if (result.token) delete result.token;
+        if (result.body && result.body.token) delete result.body.token;
+        
+        // ВАЖНО: Убрали флаг Secure! На http://localhost:8888 из-за него браузеры выбрасывали куку.
+        // SameSite=Lax обязателен для локальной разработки.
+        responseHeaders["Set-Cookie"] = `token=${extractedToken}; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800`;
+      }
+    }
+
+    // Стирание куки при выходе
+    if (action === "logout") {
+      responseHeaders["Set-Cookie"] = `token=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`;
+    }
+
+    // Нормализуем отправку body (если там объект — переводим в строку)
+    const finalBody = result.body && typeof result.body === "object" ? result.body : result;
+
+    return { 
+      statusCode: result.statusCode || 200, 
+      headers: responseHeaders, 
+      body: JSON.stringify(finalBody.body || finalBody) 
+    };
+
   } catch (e) {
-    console.error("auth error:", e);
-    return { statusCode: 500, headers: CORS, body: JSON.stringify({ error: "Внутренняя ошибка сервера" }) };
+    trackError("auth", e);
+    const pub = publicDbError(e);
+    return { 
+      statusCode: pub.statusCode, 
+      headers: { 
+        "Content-Type": "application/json", 
+        "Access-Control-Allow-Origin": currentOrigin,
+        "Access-Control-Allow-Credentials": "true"
+      }, 
+      body: JSON.stringify({ error: pub.error }) 
+    };
   }
 };

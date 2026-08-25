@@ -3,8 +3,14 @@
   "version": "2.0.0",
   "description": "SQL Generator with user accounts",
   "private": true,
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test test/*.test.js"
+  },
   "dependencies": {
-    "pg": "^8.20.0"
+    "dotenv": "^17.4.2",
+    "express": "^4.18.0",
+    "pg": "^8.21.0"
   },
   "engines": {
     "node": ">=18"
