@@ -1029,7 +1029,46 @@ function applyHistoryItem(it){
     return;
   }
   switchTab("gen");
-  if(it.sql_result||it.er_diagram||it.ddl_result) renderGen(it.sql_result||"",it.ddl_result||"",it.er_diagram||"",it.explanation||"");
+  const prompt=String(it.user_prompt||"");
+  const isReverse=/^\[reverse\]/i.test(prompt);
+  if(isReverse){
+    setGenMode("reverse");
+    const raw=prompt.replace(/^\[reverse\]\s*/i,"");
+    const ta=document.getElementById("rev_input");
+    if(ta){ ta.value=raw; ta.dispatchEvent(new Event("input")); }
+    if(it.dialect) setSelectVal("rev_dialect", it.dialect);
+  }else{
+    setGenMode("new");
+    const ta=document.getElementById("g_prompt");
+    if(ta && prompt){
+      const max=ta.maxLength>0?ta.maxLength:4000;
+      ta.value=prompt.length>max?prompt.slice(0,max):prompt;
+      ta.dispatchEvent(new Event("input"));
+    }
+    if(it.dialect) setSelectVal("g_dialect", it.dialect);
+  }
+  if(it.sql_result||it.er_diagram||it.ddl_result||it.explanation){
+    renderGen(it.sql_result||"",it.ddl_result||"",it.er_diagram||"",it.explanation||"");
+    const schemaCard=document.querySelector("#res_gen .rc:first-child");
+    const vsw=document.querySelector("#res_gen .vsw");
+    if(isReverse){
+      if(schemaCard) schemaCard.style.display="none";
+    }else{
+      if(schemaCard) schemaCard.style.display="";
+      if(vsw) vsw.style.display="";
+      setView((it.ddl_result||"").trim()?"ddl":"er");
+    }
+    const err=document.getElementById("err_gen");
+    if(err){
+      if((it.er_diagram||"").trim() && !(it.ddl_result||"").trim() && !isReverse){
+        err.textContent="В этой записи истории есть ER-диаграмма, но DDL пустой (так сохранил генератор). Сгенерируйте ещё раз или скопируйте схему с диаграммы.";
+        err.classList.add("on");
+      }else{
+        err.classList.remove("on");
+        err.textContent="";
+      }
+    }
+  }
 }
 async function saveHist(payload){
   try{await fetch("/history?action=save",{method:"POST",headers:hdrs(),credentials:"include",body:JSON.stringify(payload)}); loadHist().catch(()=>{});}catch{}
@@ -1074,14 +1113,19 @@ async function doGenerate(){
     const data=await res.json().catch(()=>({}));
     if(res.status===401){doLogout();return;}
     if(!res.ok)throw new Error(data.error||"Ошибка сервера "+res.status);
-    renderGen(data.sql||"",data.ddl_script||"",data.er_diagram||"",data.explanation||"");
+    const ddl=data.ddl_script||"", er=data.er_diagram||"";
+    renderGen(data.sql||"",ddl,er,data.explanation||"");
     // Режим design: показываем переключатель и ER-диаграмму
     const schemaCard = document.querySelector("#res_gen .rc:first-child");
     if (schemaCard) schemaCard.style.display = "";
     const vsw = document.querySelector("#res_gen .vsw");
     if (vsw) vsw.style.display = "";
-    setView("er");
-    saveHist({tab:"generate",dialect:(document.getElementById("g_dialect")||{}).value,user_prompt:prompt,sql_result:data.sql,ddl_result:data.ddl_script,er_diagram:data.er_diagram,explanation:data.explanation,tokens_used:data.tokens_used});
+    setView(ddl.trim()?"ddl":"er");
+    if(er.trim() && !ddl.trim()){
+      err.textContent="ER-диаграмма получена, но DDL пустой. Результат сохранён в историю — попробуйте сгенерировать ещё раз.";
+      err.classList.add("on");
+    }
+    saveHist({tab:"generate",dialect:(document.getElementById("g_dialect")||{}).value,user_prompt:prompt,sql_result:data.sql,ddl_result:ddl,er_diagram:er,explanation:data.explanation,tokens_used:data.tokens_used});
     refreshStats().catch(()=>{});
   }catch(e){err.textContent=e.message;err.classList.add("on");}
   finally{btn.disabled=false; if(sp)sp.classList.remove("on"); setGlobalBusy(false);}
@@ -1103,11 +1147,16 @@ async function doReverse(){
     const data=await res.json().catch(()=>({}));
     if(res.status===401){doLogout();return;}
     if(!res.ok)throw new Error(data.error||"Ошибка сервера "+res.status);
-    renderGen(data.sql||"",data.ddl_script||"",data.er_diagram||"",data.explanation||"");
+    const ddl=data.ddl_script||"", er=data.er_diagram||"";
+    renderGen(data.sql||"",ddl,er,data.explanation||"");
     // Режим reverse: скрываем весь блок схемы, оставляем только объяснение
     const schemaCard = document.querySelector("#res_gen .rc:first-child");
     if (schemaCard) schemaCard.style.display = "none";
-    saveHist({tab:"generate",dialect:(document.getElementById("rev_dialect")||{}).value,user_prompt:"[reverse] "+input.slice(0,150),sql_result:data.sql,ddl_result:data.ddl_script,er_diagram:data.er_diagram,explanation:data.explanation,tokens_used:data.tokens_used});
+    if(er.trim() && !ddl.trim()){
+      err.textContent="Диаграмма получена, но DDL пустой. Исходный SQL сохранён в историю целиком — можно открыть запись и разобрать снова.";
+      err.classList.add("on");
+    }
+    saveHist({tab:"generate",dialect:(document.getElementById("rev_dialect")||{}).value,user_prompt:"[reverse] "+input,sql_result:data.sql,ddl_result:ddl,er_diagram:er,explanation:data.explanation,tokens_used:data.tokens_used});
     refreshStats().catch(()=>{}); 
   }catch(e){err.textContent=e.message;err.classList.add("on");}
   finally{btn.disabled=false; if(sp)sp.classList.remove("on"); setGlobalBusy(false);}
@@ -1116,7 +1165,14 @@ async function doReverse(){
 function renderGen(sql,ddl,er,expl){
   gSql=sql; gDdl=ddl; gEr=ensureMermaidRelations(er,ddl); gExpl=expl;
   const de=document.getElementById("ddl_code"), xe=document.getElementById("expl_out");
-  if(de){de.textContent=ddl; if(window.Prism)Prism.highlightElement(de);}
+  if(de){
+    if(!(ddl||"").trim() && (er||"").trim()){
+      de.textContent="-- DDL для этой схемы не был сгенерирован (пустой ответ модели).\n-- ER-диаграмма на соседней вкладке сохранена. Сгенерируйте схему ещё раз.";
+    }else{
+      de.textContent=ddl||"";
+    }
+    if(window.Prism)Prism.highlightElement(de);
+  }
   if(xe)xe.textContent=expl;
   renderMermaid(gEr); setView("er");
   const r=document.getElementById("res_gen"); if(r)r.classList.add("on");

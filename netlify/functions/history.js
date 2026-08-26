@@ -7,6 +7,20 @@ const { checkAuth } = require("./_auth_middleware");
 const { getClient } = require("./_db");
 const { publicDbError, trackError } = require("./_log");
 
+// Промпт — в пределах UI (design 4000 / reverse 8000).
+// Остальные TEXT-поля — защита от гигантских ответов модели, без обрезки нормальных результатов.
+const HIST_LIMITS = {
+  user_prompt: 8000,
+  text_field: 500000,
+};
+
+function clipText(val, limit, { allowEmpty = false } = {}) {
+  if (val == null) return null;
+  const s = String(val);
+  if (!s && !allowEmpty) return null;
+  return s.length > limit ? s.slice(0, limit) : s;
+}
+
 exports.handler = async (event) => {
   // Динамически вычисляем origin для корректной передачи кук бэкендом
   const currentOrigin = event.headers.origin || event.headers.Origin || "*";
@@ -72,13 +86,13 @@ exports.handler = async (event) => {
             auth.user.sub,
             body.tab || "generate",
             String(body.dialect || "").slice(0, 64),
-            (body.user_prompt || "").slice(0, 500),
-            body.sql_result  || null,
-            body.ddl_result  || null,
-            body.er_diagram  || null,
-            body.explanation || null,
-            body.audit_result || null,
-            body.inserts_result || null,
+            clipText(body.user_prompt, HIST_LIMITS.user_prompt, { allowEmpty: true }) || "",
+            clipText(body.sql_result, HIST_LIMITS.text_field),
+            clipText(body.ddl_result, HIST_LIMITS.text_field),
+            clipText(body.er_diagram, HIST_LIMITS.text_field),
+            clipText(body.explanation, HIST_LIMITS.text_field),
+            clipText(body.audit_result, HIST_LIMITS.text_field),
+            clipText(body.inserts_result, HIST_LIMITS.text_field),
             body.tokens_used || null,
           ]
         );
