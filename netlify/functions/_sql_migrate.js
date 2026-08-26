@@ -163,19 +163,36 @@ function parseDdlTables(ddl) {
   return result;
 }
 
+/** Имена таблиц даже из обрезанного DDL (без закрывающего ); ). */
+function extractTableNames(ddl) {
+  const names = new Set();
+  const re = /CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:["'`]?[\w]+["'`]?\.)?["'`]?(\w+)["'`]/gi;
+  let m;
+  while ((m = re.exec(ddl || ""))) names.add(m[1].toLowerCase());
+  return names;
+}
+
 function buildSchemaDiff(oldDdl, newDdl) {
   const oldT = parseDdlTables(oldDdl);
   const newT = parseDdlTables(newDdl);
+  // Если схема обрезана посередине CREATE TABLE, parseDdlTables таблицу не видит,
+  // а имя уже есть — иначе diff ошибочно требует CREATE заново.
+  const oldNames = extractTableNames(oldDdl);
+  const newNames = extractTableNames(newDdl);
+  for (const t of Object.keys(oldT)) oldNames.add(t);
+  for (const t of Object.keys(newT)) newNames.add(t);
   const addedCols = [];
   const addedTables = [];
   const droppedTables = [];
   const addedFks = [];
   for (const t of Object.keys(newT)) {
-    if (!oldT[t]) {
+    if (!oldNames.has(t)) {
       addedTables.push(t);
       (newT[t].fks || []).forEach(fk => addedFks.push({ child: t, ...fk }));
       continue;
     }
+    // Таблица есть в OLD по имени, но тело не распарсилось (обрезка) — не CREATE и не угадываем ALTER.
+    if (!oldT[t]) continue;
     const oldCols = oldT[t].cols || oldT[t];
     const newCols = newT[t].cols || newT[t];
     for (const c of Object.keys(newCols)) {
@@ -186,8 +203,8 @@ function buildSchemaDiff(oldDdl, newDdl) {
       if (!oldFkKeys.has(fk.col + ">" + fk.parent)) addedFks.push({ child: t, ...fk });
     });
   }
-  for (const t of Object.keys(oldT)) {
-    if (!newT[t]) droppedTables.push(t);
+  for (const t of oldNames) {
+    if (!newNames.has(t)) droppedTables.push(t);
   }
   const lines = [];
   addedTables.forEach(t => lines.push(`CREATE TABLE ${t}`));
@@ -351,6 +368,7 @@ module.exports = {
   mysqlVarcharLen,
   sanitizeTargetDialectSql,
   parseDdlTables,
+  extractTableNames,
   buildSchemaDiff,
   ensureAltersFromDiff,
   ensureFksFromDiff,

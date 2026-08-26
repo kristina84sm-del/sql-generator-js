@@ -19,8 +19,11 @@ pool.on("error", (err) => {
  */
 async function checkRateLimit(userId) {
   try {
+    // Почасовой потолок по request_log (все OpenAI-эндпоинты в одном бакете).
+    // По умолчанию 20/час — при схемах до 20k символов один migrate/mock заметно дороже.
+    // Переопределение: RATE_HOURLY_LIMIT в env (0 = выключить почасовой лимит).
     const hourlyCap = Number(process.env.RATE_HOURLY_LIMIT);
-    const hourly = Number.isFinite(hourlyCap) ? hourlyCap : 25;
+    const hourly = Number.isFinite(hourlyCap) ? hourlyCap : 20;
     if (hourly > 0) {
       const { rows: hourRows } = await pool.query(
         `SELECT COUNT(*) AS cnt FROM request_log

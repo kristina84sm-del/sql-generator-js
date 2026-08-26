@@ -412,8 +412,8 @@ pre.codeblock{margin:0;background:var(--bg);border-radius:7px;overflow-x:auto;fo
   <div class="card" id="mig_card_compare">
     <h2>Сравнение схем</h2>
     <div class="fr">
-      <div class="fg"><label>Текущая схема (FROM)</label><textarea id="mig_old" class="mono" style="min-height:200px" maxlength="6000" placeholder="CREATE TABLE users (id INT, name VARCHAR(50));"></textarea><div class="cc" id="cc_mig_old">0 / 6000</div></div>
-      <div class="fg"><label>Целевая схема (TO)</label><textarea id="mig_new" class="mono" style="min-height:200px" maxlength="6000" placeholder="CREATE TABLE users (id SERIAL PRIMARY KEY, name VARCHAR(100), email VARCHAR(255));"></textarea><div class="cc" id="cc_mig_new">0 / 6000</div></div>
+      <div class="fg"><label>Текущая схема (FROM)</label><textarea id="mig_old" class="mono" style="min-height:200px" maxlength="20000" placeholder="CREATE TABLE users (id INT, name VARCHAR(50));"></textarea><div class="cc" id="cc_mig_old">0 / 20000</div></div>
+      <div class="fg"><label>Целевая схема (TO)</label><textarea id="mig_new" class="mono" style="min-height:200px" maxlength="20000" placeholder="CREATE TABLE users (id SERIAL PRIMARY KEY, name VARCHAR(100), email VARCHAR(255));"></textarea><div class="cc" id="cc_mig_new">0 / 20000</div></div>
     </div>
     <button type="button" class="btn-sec" onclick="doDiffPreview()" style="width:100%;margin-bottom:.9rem;padding:.65rem;">🔍 Показать детальные изменения по полям</button>
     <div id="diff_preview" style="display:none;margin-bottom:.9rem;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:.9rem 1.1rem;font-family:ui-monospace,monospace;font-size:.81rem;line-height:1.75;max-height:320px;overflow-y:auto;"></div>
@@ -504,8 +504,8 @@ pre.codeblock{margin:0;background:var(--bg);border-radius:7px;overflow-x:auto;fo
         </div>
       </div>
       <div id="test_ocr_status" style="display:none;font-size:.78rem;color:var(--accent);margin-bottom:.4rem;padding:.4rem .6rem;background:rgba(59,130,246,.08);border-radius:6px;"></div>
-      <textarea id="test_schema_manual" class="mono" style="min-height:160px" maxlength="6000" placeholder="CREATE TABLE users (id SERIAL PRIMARY KEY, name VARCHAR(100));"></textarea>
-      <div class="cc" id="cc_test_manual">0 / 6000</div>
+      <textarea id="test_schema_manual" class="mono" style="min-height:160px" maxlength="20000" placeholder="CREATE TABLE users (id SERIAL PRIMARY KEY, name VARCHAR(100));"></textarea>
+      <div class="cc" id="cc_test_manual">0 / 20000</div>
     </div>
   </div>
 
@@ -872,9 +872,9 @@ function enforceMaxLength(el,max){ if(el.value.length>max) el.value=el.value.sli
 function initCounters(){
   [["g_prompt","cc_gp",4000],["rev_input","cc_rev",8000],
    ["a_schema","cc_as",6000],["a_rules","cc_ar",2000],
-   ["mig_old","cc_mig_old",6000],["mig_new","cc_mig_new",6000],
+   ["mig_old","cc_mig_old",20000],["mig_new","cc_mig_new",20000],
    ["mono_schema","cc_mono",8000],
-   ["test_schema_manual","cc_test_manual",6000],
+   ["test_schema_manual","cc_test_manual",20000],
    ["pt_scenario","cc_pt_scenario",500],
    ["tr_schema_manual","cc_tr_schema",8000]
   ].forEach(([ta,cc,lim])=>{
@@ -1603,6 +1603,10 @@ async function doMigrate2(){
   err.classList.remove("on");
   const oldSchema=(document.getElementById("mig_old")||{}).value||"", newSchema=(document.getElementById("mig_new")||{}).value||"";
   if(!oldSchema.trim()||!newSchema.trim()){err.textContent="Вставьте обе схемы — старую и новую."; err.classList.add("on"); return;}
+  if(oldSchema.length>=20000||newSchema.length>=20000){
+    err.textContent="Схема упирается в лимит 20000 символов — таблицы в конце могут обрезаться. Сократите DDL или мигрируйте частями.";
+    err.classList.add("on");
+  }
   const sourceDialect=(document.getElementById("mig_from_dialect")||{}).value||"postgresql";
   const targetDialect=(document.getElementById("mig_to_dialect")||{}).value||"postgresql";
   btn.disabled=true; if(sp)sp.classList.add("on");
@@ -1846,7 +1850,7 @@ async function doPolyMock(){
   const tableCounts={};
   tables.forEach(t=>{const inp=document.getElementById("pmtc_"+t.name); tableCounts[t.name]=inp?Math.min(10,Math.max(1,parseInt(inp.value)||3)):3;});
   const isAuto=document.getElementById("test_src_btn_auto").classList.contains("active");
-  const schemaForMock=(isAuto&&gEr)?gEr:getActiveTestSchema();
+  const schemaForMock=isAuto?(gDdl||gEr||""):getActiveTestSchema();
   btn.disabled=true; if(sp)sp.classList.add("on");
   setGlobalBusy(true,"Генерирую тестовые данные…");
   try{
@@ -2353,7 +2357,7 @@ const TOUR_STEPS=[
    desc:"Для классической задачи: у вас есть старая и новая версия схемы (например после доработки продукта), нужен скрипт перехода без потери данных.",
    ex:null, action:()=>setMigMode('compare')},
    {target:"#mig_old",pos:"below-field",title:"Поля «Текущая» и «Новая» схема",
-   desc:"Вставьте обе версии DDL. Слева — как сейчас в продакшене, справа — как должно стать. Лимит 6000 символов на каждое поле.",
+   desc:"Вставьте обе версии DDL. Слева — как сейчас в продакшене, справа — как должно стать. Лимит 20000 символов на каждое поле.",
    ex:null, action:()=>setMigMode('compare')},
    {target:"#mig_from_dialect",pos:"bottom",title:"Диалект источника (FROM)",
    desc:"СУБД, на которой сейчас живёт старая схема: PostgreSQL, MySQL, SQL Server, Oracle и т.д. Нужен, чтобы ИИ правильно читал типы и синтаксис слева.",

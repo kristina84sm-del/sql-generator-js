@@ -12,11 +12,12 @@ const {
   ensureFksFromDiff,
   lintMigrationSql,
   ddlTransactionalNote,
+  extractTableNames,
 } = require("./_sql_migrate");
 const ALLOWED_MODELS = new Set(["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-3.5-turbo"]);
 const DEFAULT_MODEL  = "gpt-4o-mini";
  
-const LIMITS = { schema: 6000, rules: 1000 };
+const LIMITS = { schema: 20000, rules: 2000 };
  
 const MIGRATION_SYSTEM_PROMPT = `
 Ты DBA, специализирующийся на безопасных миграциях схем БД без
@@ -150,11 +151,28 @@ function truncate(str, limit) {
 }
 
 function extractCreateTableNames(ddl) {
-  const names = new Set();
-  const re = /CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:\[?"?`?[\w]+"?`?\]?\.)?\[?"?`?(\w+)"?`?\]?/gi;
-  let m;
-  while ((m = re.exec(ddl || ""))) names.add(m[1].toLowerCase());
-  return names;
+  return extractTableNames(ddl);
+}
+
+/** Убирает CREATE TABLE для таблиц, которые уже есть в OLD (модель иногда игнорирует diff). */
+function dropSpuriousCreates(sql, oldSchema) {
+  if (!sql) return sql;
+  const oldTables = extractCreateTableNames(oldSchema);
+  if (!oldTables.size) return sql;
+  const stmts = splitSqlStatements(sql);
+  const kept = [];
+  let removed = 0;
+  for (const raw of stmts) {
+    const created = tableFrom(raw, "create");
+    if (created && oldTables.has(created)) {
+      removed++;
+      kept.push(`-- пропущено: таблица ${created} уже есть в OLD_SCHEMA\n`);
+      continue;
+    }
+    kept.push(raw);
+  }
+  if (!removed) return sql;
+  return kept.map(s => s.replace(/^\s+/, "").replace(/\s+$/, "")).filter(Boolean).join("\n\n").replace(/\s*$/, "\n");
 }
  
 function stripSqlComments(s) {
@@ -308,8 +326,12 @@ exports.handler = async (event) => {
   try { body = JSON.parse(event.body || "{}"); }
   catch { return { statusCode: 400, headers: CORS, body: JSON.stringify({ error: "Невалидный JSON" }) }; }
  
-  const oldSchema = truncate((body.old_schema || "").trim(), LIMITS.schema);
-  const newSchema = truncate((body.new_schema || "").trim(), LIMITS.schema);
+  const oldRaw = (body.old_schema || "").trim();
+  const newRaw = (body.new_schema || "").trim();
+  const oldTruncated = oldRaw.length > LIMITS.schema;
+  const newTruncated = newRaw.length > LIMITS.schema;
+  const oldSchema = truncate(oldRaw, LIMITS.schema);
+  const newSchema = truncate(newRaw, LIMITS.schema);
   const rules     = truncate((body.rules || "").trim(), LIMITS.rules);
   const model     = validateModel(body.model);
   const sourceDialect = (body.source_dialect || body.dialect || "postgresql").trim().toLowerCase();
@@ -351,12 +373,21 @@ ${rules || "(не заданы)"}`;
       return { statusCode: 502, headers: CORS, body: JSON.stringify({ error: "Модель не вернула migration_sql." }) };
  
     migration_sql = reorderMigrationSql(migration_sql, oldSchema);
+    migration_sql = dropSpuriousCreates(migration_sql, oldSchema);
     migration_sql = ensureAltersFromDiff(migration_sql, schemaDiff);
     migration_sql = ensureFksFromDiff(migration_sql, schemaDiff);
     migration_sql = sanitizeTargetDialectSql(migration_sql, targetDialect);
     const txnNote = dryRun ? ddlTransactionalNote(targetDialect) : "";
     if (txnNote && !migration_sql.includes(txnNote)) migration_sql = txnNote + "\n" + migration_sql;
     const warnings = lintMigrationSql(migration_sql, targetDialect);
+    if (oldTruncated || newTruncated) {
+      warnings.unshift(
+        "Схема была обрезана по лимиту " + LIMITS.schema +
+        " символов (FROM: " + (oldTruncated ? "да" : "нет") +
+        ", TO: " + (newTruncated ? "да" : "нет") +
+        "). Таблицы в конце DDL могли не попасть в сравнение — сократите схему или разбейте миграцию."
+      );
+    }
  
     await logRequest(auth.user.sub, "generate_migration");
     return { statusCode: 200, headers: CORS, body: JSON.stringify({ migration_sql, summary, mapping_table, verification_report, warnings, tokens_used: tokensUsed }) };
