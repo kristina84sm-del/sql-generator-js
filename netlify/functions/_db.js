@@ -5,11 +5,28 @@ const CONNECT_MS = Number(process.env.DB_CONNECT_TIMEOUT_MS || 8000);
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-function dbConfig() {
+/** pg>=8.21 maps require/prefer to verify-full; Amvera Postgres uses a self-signed chain. */
+function normalizeDatabaseUrl(raw) {
+  if (!raw) return raw;
+  try {
+    const u = new URL(raw);
+    u.searchParams.delete("sslmode");
+    return u.toString();
+  } catch {
+    return String(raw)
+      .replace(/([?&])sslmode=[^&]*/gi, "$1")
+      .replace(/[?&]$/, "")
+      .replace(/\?&/, "?")
+      .replace(/&&+/g, "&");
+  }
+}
+
+function dbConfig(overrides = {}) {
   return {
-    connectionString: process.env.DATABASE_URL,
+    connectionString: normalizeDatabaseUrl(process.env.DATABASE_URL),
     ssl: { rejectUnauthorized: false },
     connectionTimeoutMillis: CONNECT_MS,
+    ...overrides,
   };
 }
 
@@ -51,4 +68,4 @@ async function getClient() {
   throw last;
 }
 
-module.exports = { getClient, dbConfig, isTransientDbError };
+module.exports = { getClient, dbConfig, normalizeDatabaseUrl, isTransientDbError };

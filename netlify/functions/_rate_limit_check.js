@@ -3,12 +3,9 @@
 
 const { Pool } = require("pg");
 const { trackError, isTransientDbError } = require("./_log");
+const { dbConfig } = require("./_db");
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
-  connectionTimeoutMillis: Number(process.env.DB_CONNECT_TIMEOUT_MS || 8000),
-});
+const pool = new Pool(dbConfig());
 pool.on("error", (err) => {
   trackError("rate_limit_pool", err);
 });

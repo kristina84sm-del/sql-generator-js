@@ -54,11 +54,8 @@ server.requestTimeout = 5 * 60 * 1000;
 server.headersTimeout  = 5 * 60 * 1000 + 1000;
  
 const { Pool } = require("pg");
-const cleanPool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
-  connectionTimeoutMillis: Number(process.env.DB_CONNECT_TIMEOUT_MS || 8000),
-});
+const { dbConfig } = require("./netlify/functions/_db");
+const cleanPool = new Pool(dbConfig({ max: 2 }));
 async function cleanupSessions() {
   try {
     const r = await cleanPool.query(

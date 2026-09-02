@@ -3,11 +3,9 @@
  
 const { Pool } = require("pg");
 const { checkAuth } = require("./_auth_middleware");
+const { dbConfig } = require("./_db");
  
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
-});
+const pool = new Pool(dbConfig());
 // Без этого обработчика обрыв простаивающего соединения с БД
 // (даже короткий сетевой сбой) роняет ВЕСЬ процесс функции целиком —
 // это особенность EventEmitter в node-postgres, а не баг в вашем коде.
