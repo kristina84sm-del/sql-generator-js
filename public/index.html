@@ -653,7 +653,7 @@ pre.codeblock{margin:0;background:var(--bg);border-radius:7px;overflow-x:auto;fo
       <button type="button" class="grade-btn" data-grade="interview" onclick="setTrainerGrade('interview')">Техсобес аналитика</button>
     </div>
     <div class="fr">
-      <div class="fg"><label>Модель</label><select id="tr_model"><option value="gpt-4o-mini">GPT-4o mini</option><option value="gpt-4o">GPT-4o</option></select></div>
+      <div class="fg"><label>Модель</label><select id="tr_model"><option value="gpt-4o">GPT-4o (рекомендуется для эталонов)</option><option value="gpt-4o-mini">GPT-4o mini</option></select></div>
       <div class="fg"><label>Диалект SQL</label><select id="tr_dialect"></select></div>
     </div>
     <div class="fg" id="tr_focus_block">
@@ -2337,7 +2337,13 @@ function sqlToSqlite(sql){
     .replace(/\bILIKE\b/gi,"LIKE")
     .replace(/\bTRUE\b/gi,"1")
     .replace(/\bFALSE\b/gi,"0")
-    .replace(/::\w+/g,"");
+    .replace(/::\w+/g,"")
+    .replace(/\b(?:NOW|CURRENT_TIMESTAMP)\s*\(\s*\)/gi,"datetime('now')")
+    .replace(/\bCURRENT_DATE\b/gi,"date('now')")
+    .replace(/datetime\('now'\)\s*-\s*INTERVAL\s+'(\d+)\s*(day|days|month|months|year|years|hour|hours|minute|minutes|week|weeks)'/gi,
+      (_,n,u)=>"datetime('now','-"+n+" "+u.replace(/s$/i,"")+"')")
+    .replace(/date\('now'\)\s*-\s*INTERVAL\s+'(\d+)\s*(day|days|month|months|year|years|week|weeks)'/gi,
+      (_,n,u)=>"date('now','-"+n+" "+u.replace(/s$/i,"")+"')");
 }
 function canonicalizeResult(execOut){
   if(!execOut||!execOut.length) return [];

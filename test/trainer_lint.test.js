@@ -2,6 +2,8 @@ const { describe, it } = require("node:test");
 const assert = require("node:assert/strict");
 const {
   lintSolutionSql,
+  lintTaskConsistency,
+  repairTaskAlignment,
   filterSafeTasks,
   extractOuterJoinAliases,
 } = require("../netlify/functions/generate_sql_trainer");
@@ -9,7 +11,7 @@ const {
 const SCHEMA = `
 CREATE TABLE "User" (id INT PRIMARY KEY);
 CREATE TABLE "Account" (id INT PRIMARY KEY, user_id INT);
-CREATE TABLE "Transaction" (id INT PRIMARY KEY, account_id INT, created_at TIMESTAMP);
+CREATE TABLE "Transaction" (id INT PRIMARY KEY, account_id INT, created_at TIMESTAMP, amount DECIMAL);
 `;
 
 describe("extractOuterJoinAliases", () => {
@@ -129,5 +131,35 @@ describe("filterSafeTasks", () => {
     assert.equal(dropped[0].title, "bad");
     assert.ok(kept.some(t => t.title === "good"));
     assert.ok(kept.some(t => t.kind === "oral"));
+  });
+
+  it("repairs AVG/COUNT shame etalon instead of dropping", () => {
+    const shame = {
+      id: 1,
+      kind: "sql",
+      title: "avg users",
+      question: "Найди пользователей со средней суммой транзакций",
+      expected_result: "Список пользователей с их средней суммой транзакций, где средняя сумма больше 0",
+      solution_sql: `SELECT u.id, AVG(t.amount) AS avg_transaction_amount
+FROM "User" u
+JOIN "Account" a ON u.id = a.user_id
+JOIN "Transaction" t ON a.id = t.account_id
+WHERE t.created_at >= NOW() - INTERVAL '1 month'
+GROUP BY u.id
+HAVING COUNT(t.id) > 5`,
+    };
+    const issues = lintTaskConsistency(shame);
+    assert.ok(issues.includes("text_sql_mismatch:expected_avg_having_count"), issues.join(","));
+
+    const { task, repaired } = repairTaskAlignment(shame);
+    assert.equal(repaired, true);
+    assert.match(task.solution_sql, /HAVING\s+AVG\s*\(\s*t\.amount\s*\)\s*>\s*0/i);
+    assert.doesNotMatch(task.solution_sql, /HAVING\s+COUNT/i);
+    assert.doesNotMatch(task.solution_sql, /\bWHERE\b/i);
+
+    const { kept, dropped } = filterSafeTasks([shame], SCHEMA);
+    assert.equal(dropped.length, 0, JSON.stringify(dropped));
+    assert.equal(kept.length, 1);
+    assert.match(kept[0].solution_sql, /HAVING\s+AVG/i);
   });
 });
