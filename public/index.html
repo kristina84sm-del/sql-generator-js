@@ -2255,7 +2255,7 @@ async function doSqlTrainer(more){
         sample_data:getTrainerSample(),
         grade:gTrainerGrade,
         dialect:(document.getElementById("tr_dialect")||{}).value||"postgresql",
-        model:(document.getElementById("tr_model")||{}).value||"gpt-4o-mini",
+        model:(document.getElementById("tr_model")||{}).value||"gpt-4o",
         focus_metric:(document.getElementById("tr_focus")||{}).value||"",
         avoid_topics: avoidTopics,
         avoid_titles: avoidTitles
@@ -2405,7 +2405,7 @@ async function checkTrainerAnswer(id){
           action:"check",
           schema:getTrainerSchema(),
           dialect:(document.getElementById("tr_dialect")||{}).value||"postgresql",
-          model:(document.getElementById("tr_model")||{}).value||"gpt-4o-mini",
+          model:(document.getElementById("tr_model")||{}).value||"gpt-4o",
           user_sql:userSql,
           task:t
         })});
