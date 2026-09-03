@@ -286,9 +286,12 @@ function ensureFksFromDiff(sql, diff) {
     return true;
   });
   if (!missing.length) return sql;
-  const stmts = missing.map(f =>
-    `ALTER TABLE ${f.child} ADD CONSTRAINT fk_${f.child}_${f.col} FOREIGN KEY (${f.col}) REFERENCES ${f.parent}(${f.parentCol || "id"}); -- FK`
-  ).join("\n");
+  const stmts = missing.map(f => {
+    const child = quoteIdentIfNeeded(f.child);
+    const parent = quoteIdentIfNeeded(f.parent);
+    const onDel = f.onDelete && f.onDelete !== "NO ACTION" ? ` ON DELETE ${f.onDelete}` : "";
+    return `ALTER TABLE ${child} ADD CONSTRAINT fk_${normIdent(f.child)}_${normIdent(f.col)} FOREIGN KEY (${f.col}) REFERENCES ${parent}(${f.parentCol || "id"})${onDel};`;
+  }).join("\n");
   if (/-- ШАГ 5:/i.test(sql)) return sql.replace(/(-- ШАГ 5:[^\n]*\n)/i, `$1${stmts}\n`);
   if (/COMMIT\s*;|ROLLBACK\s*;/i.test(sql)) return sql.replace(/\n(?=(COMMIT|ROLLBACK)\s*;)/i, "\n" + stmts + "\n");
   return sql + "\n" + stmts + "\n";
@@ -312,11 +315,10 @@ function normIdent(name) {
 
 /**
  * Пост-очистка сырого migration_sql: чинит типы, дубли, безымянные CONSTRAINT,
- * NOT NULL без DEFAULT на существующих таблицах, кавычки reserved.
+ * снимает NOT NULL без DEFAULT у ADD COLUMN, кавычки reserved, дописывает FK из schemaDiff.
  */
 function cleanupMigrationSql(sql, opts) {
   if (!sql) return sql;
-  const oldNames = new Set([...(opts && opts.oldTableNames ? opts.oldTableNames : [])].map(normIdent));
   let text = String(sql);
 
   // 1) Починить обрезанные DECIMAL/NUMERIC(n
@@ -356,21 +358,40 @@ function cleanupMigrationSql(sql, opts) {
 
   const createFkKeys = new Set();
   const createTables = new Set();
+  const createFkCols = []; // { table, col } из CREATE TABLE — для индексов
+  const preferredSpell = new Map(); // lower -> as written in script ("Card" or card)
+  const rememberSpell = (tok) => {
+    const n = normIdent(tok);
+    if (!n) return;
+    if (/^["`]/.test(tok) || /[A-Z]/.test(String(tok).replace(/^["'`]+|["'`]+$/g, ""))) {
+      preferredSpell.set(n, `"${String(tok).replace(/^["'`]+|["'`]+$/g, "")}"`);
+    } else if (!preferredSpell.has(n)) {
+      preferredSpell.set(n, PG_RESERVED.has(n) ? `"${n}"` : n);
+    }
+  };
+  const spell = (name) => preferredSpell.get(normIdent(name)) || quoteIdentIfNeeded(name);
+
   parts.forEach(p => {
-    const cm = p.match(/CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?["'`]?(\w+)["'`]?/i);
+    const cm = p.match(/CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:"([^"]+)"|(\w+))/i);
     if (cm) {
-      createTables.add(cm[1].toLowerCase());
+      const raw = cm[1] || cm[2];
+      createTables.add(raw.toLowerCase());
+      rememberSpell(cm[1] ? `"${cm[1]}"` : cm[2]);
       const body = p.match(/\(([\s\S]*)\)\s*$/);
       if (body) {
-        const re = /REFERENCES\s+["'`]?(\w+)["'`]/gi;
+        const re = /(?:FOREIGN\s+KEY\s*\(\s*["'`]?(\w+)["'`]?\s*\)\s*)?REFERENCES\s+["'`]?(\w+)["'`]/gi;
         let r;
         while ((r = re.exec(body[1]))) {
-          const col = (body[1].slice(Math.max(0, r.index - 80), r.index).match(/["'`]?(\w+)["'`]?\s*$/) || [])[1];
-          createFkKeys.add(cm[1].toLowerCase() + ">" + (col || "").toLowerCase() + ">" + r[1].toLowerCase());
-          createFkKeys.add(cm[1].toLowerCase() + ">>" + r[1].toLowerCase());
+          const col = r[1] || (body[1].slice(Math.max(0, r.index - 80), r.index).match(/["'`]?(\w+)["'`]?\s+[\w().,\s]+$/i) || [])[1];
+          createFkKeys.add(raw.toLowerCase() + ">" + (col || "").toLowerCase() + ">" + r[2].toLowerCase());
+          createFkKeys.add(raw.toLowerCase() + ">>" + r[2].toLowerCase());
+          if (col) createFkCols.push({ table: raw.toLowerCase(), col: col.toLowerCase() });
+          rememberSpell(r[2]);
         }
       }
     }
+    const am = p.match(/ALTER\s+TABLE\s+("[^"]+"|\w+)/i);
+    if (am) rememberSpell(am[1]);
   });
 
   const seenAlterCol = new Set();
@@ -383,65 +404,144 @@ function cleanupMigrationSql(sql, opts) {
     p = p.replace(/\s*--\s*новое поле[^\n]*/gi, "");
     p = p.replace(/\s*--\s*FK\s*$/gim, "");
 
-    const alterCol = p.match(/^ALTER\s+TABLE\s+([^\s]+)\s+ADD\s+COLUMN\s+["'`]?(\w+)["'`]?\s+(.+)$/i);
+    // комментарии перед statement (ШАГ N:) — иначе ^ALTER не матчится
+    const leadComments = (p.match(/^((?:\s*--[^\n]*\n)+)/) || [])[1] || "";
+    const stmt = p.slice(leadComments.length).trim();
+    const keepLead = leadComments.trim() ? leadComments.trim() + "\n" : "";
+
+    const alterCol = stmt.match(/^ALTER\s+TABLE\s+("[^"]+"|[^\s]+)\s+ADD\s+COLUMN\s+["'`]?(\w+)["'`]?\s+(.+)$/i);
     if (alterCol) {
       let tableTok = alterCol[1];
       const col = alterCol[2].toLowerCase();
       let rest = alterCol[3].trim().replace(/;?\s*$/, "");
       const tNorm = normIdent(tableTok);
-      // единый стиль: если в скрипте есть CREATE "Card" — не плодим card
       const key = tNorm + "." + col;
       if (seenAlterCol.has(key)) continue;
       seenAlterCol.add(key);
 
-      if (PG_RESERVED.has(tNorm) && !/^["`]/.test(tableTok)) tableTok = `"${tNorm}"`;
+      rememberSpell(tableTok);
+      tableTok = spell(tableTok);
 
-      // починить тип DECIMAL(10
       rest = rest.replace(/^(DECIMAL|NUMERIC)\s*\(\s*(\d+)\s*(?=\s+NOT\s+NULL|\s+NULL|\s+DEFAULT|$)/i, "$1($2, 2)");
 
-      // существующая таблица + NOT NULL без DEFAULT → убрать NOT NULL (безопаснее для данных)
-      const isExisting = oldNames.has(tNorm) || (!createTables.has(tNorm) && oldNames.size > 0);
-      if (isExisting && /\bNOT\s+NULL\b/i.test(rest) && !/\bDEFAULT\b/i.test(rest)) {
+      // ADD COLUMN + NOT NULL без DEFAULT — риск падения на данных в существующей таблице.
+      // Оставляем nullable; NOT NULL/DEFAULT — после backfill (шаг 2).
+      if (/\bNOT\s+NULL\b/i.test(rest) && !/\bDEFAULT\b/i.test(rest)) {
         rest = rest.replace(/\bNOT\s+NULL\b/gi, "").replace(/\s{2,}/g, " ").trim();
       }
 
-      out.push(`ALTER TABLE ${tableTok} ADD COLUMN ${col} ${rest}`);
+      out.push(`${keepLead}ALTER TABLE ${tableTok} ADD COLUMN ${col} ${rest}`.trim());
       continue;
     }
 
-    const alterFk = p.match(/^ALTER\s+TABLE\s+([^\s]+)\s+ADD\s+CONSTRAINT\s+(\w+)\s+FOREIGN\s+KEY\s*\(\s*([^)]+)\)\s*REFERENCES\s+([^\s(;]+)(?:\(([^)]*)\))?(.*)$/i);
-    const alterFkAnon = p.match(/^ALTER\s+TABLE\s+([^\s]+)\s+ADD\s+(?:CONSTRAINT\s+)?FOREIGN\s+KEY/i);
+    const alterFk = stmt.match(/^ALTER\s+TABLE\s+("[^"]+"|[^\s]+)\s+ADD\s+CONSTRAINT\s+(\w+)\s+FOREIGN\s+KEY\s*\(\s*([^)]+)\)\s*REFERENCES\s+("[^"]+"|[^\s(;]+)(?:\(([^)]*)\))?(.*)$/i);
+    const alterFkAnon = stmt.match(/^ALTER\s+TABLE\s+("[^"]+"|[^\s]+)\s+ADD\s+(?:CONSTRAINT\s+)?FOREIGN\s+KEY/i);
     if (alterFk || alterFkAnon) {
-      const tableTok = alterFk ? alterFk[1] : (p.match(/ALTER\s+TABLE\s+([^\s]+)/i) || [])[1];
+      const tableTok = alterFk ? alterFk[1] : (stmt.match(/ALTER\s+TABLE\s+("[^"]+"|[^\s]+)/i) || [])[1];
       const tNorm = normIdent(tableTok);
-      const cols = alterFk ? alterFk[3] : ((p.match(/FOREIGN\s+KEY\s*\(\s*([^)]+)\)/i) || [])[1] || "");
-      const parent = alterFk ? alterFk[4] : ((p.match(/REFERENCES\s+([^\s(;]+)/i) || [])[1] || "");
+      const cols = alterFk ? alterFk[3] : ((stmt.match(/FOREIGN\s+KEY\s*\(\s*([^)]+)\)/i) || [])[1] || "");
+      const parent = alterFk ? alterFk[4] : ((stmt.match(/REFERENCES\s+("[^"]+"|[^\s(;]+)/i) || [])[1] || "");
       const col0 = normIdent(String(cols).split(",")[0]);
       const pNorm = normIdent(parent);
       const fkKey = tNorm + ">" + col0 + ">" + pNorm;
+      const onDel = ((alterFk && alterFk[6]) || stmt).match(/ON\s+DELETE\s+(CASCADE|RESTRICT|SET\s+NULL|SET\s+DEFAULT|NO\s+ACTION)/i);
+      const onDelSql = onDel ? ` ON DELETE ${onDel[1].replace(/\s+/g, " ").toUpperCase()}` : "";
 
-      // FK уже в CREATE этой (новой) таблицы — ALTER не нужен
       if (createTables.has(tNorm) && (createFkKeys.has(fkKey) || createFkKeys.has(tNorm + ">>" + pNorm))) continue;
       if (seenFkAlter.has(fkKey)) continue;
       seenFkAlter.add(fkKey);
 
-      if (alterFk) {
-        let stmt = p.replace(/;?\s*$/, "");
-        if (PG_RESERVED.has(tNorm) && !/^["`]/.test(tableTok)) {
-          stmt = stmt.replace(/ALTER\s+TABLE\s+[^\s]+/i, `ALTER TABLE "${tNorm}"`);
-        }
-        if (PG_RESERVED.has(pNorm) && parent && !/^["`]/.test(parent)) {
-          stmt = stmt.replace(new RegExp("REFERENCES\\s+" + parent.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\b", "i"), `REFERENCES "${pNorm}"`);
-        }
-        out.push(stmt);
-      } else {
-        // безымянный — уже должны были починить regex выше; если остался — дропаем как мусор
-        continue;
-      }
+      const cname = (alterFk && alterFk[2] && !/^foreign$/i.test(alterFk[2]))
+        ? alterFk[2]
+        : `fk_${tNorm}_${col0}`.replace(/[^a-z0-9_]/gi, "_").slice(0, 60);
+      const pcol = (alterFk && alterFk[5]) ? `(${alterFk[5]})` : "(id)";
+      out.push(
+        `${keepLead}ALTER TABLE ${spell(tableTok)} ADD CONSTRAINT ${cname} FOREIGN KEY (${cols}) REFERENCES ${spell(parent)}${pcol}${onDelSql}`.trim()
+      );
       continue;
     }
 
     out.push(p.replace(/;?\s*$/, ""));
+  }
+
+  // FK из diff для существующих таблиц (новые колонки с REFERENCES), если модель их забыла
+  const diff = (opts && opts.schemaDiff) || {};
+  const addedFks = diff.addedFks || [];
+  const fkInjects = [];
+  addedFks.forEach(f => {
+    const tNorm = normIdent(f.child);
+    const pNorm = normIdent(f.parent);
+    const col = normIdent(f.col);
+    if (createTables.has(tNorm)) return; // FK должен быть в CREATE
+    const fkKey = tNorm + ">" + col + ">" + pNorm;
+    if (seenFkAlter.has(fkKey)) return;
+    if (createFkKeys.has(fkKey)) return;
+    seenFkAlter.add(fkKey);
+    const onDel = f.onDelete && f.onDelete !== "NO ACTION" ? ` ON DELETE ${f.onDelete}` : "";
+    const cname = `fk_${tNorm}_${col}`.replace(/[^a-z0-9_]/gi, "_").slice(0, 60);
+    fkInjects.push(
+      `ALTER TABLE ${spell(f.child)} ADD CONSTRAINT ${cname} FOREIGN KEY (${col}) REFERENCES ${spell(f.parent)}(${f.parentCol || "id"})${onDel}`
+    );
+  });
+  if (fkInjects.length) {
+    // до любого фрагмента с COMMIT/ROLLBACK (даже если перед ним комментарии шагов)
+    let insertAt = out.findIndex(s => /\b(COMMIT|ROLLBACK)\b/i.test(String(s)));
+    if (insertAt < 0) insertAt = out.length;
+    const step5 = out.findIndex(s => /--\s*ШАГ\s*5:/i.test(s));
+    if (step5 >= 0 && step5 < insertAt) insertAt = step5 + 1;
+    out.splice(insertAt, 0, ...fkInjects);
+  }
+
+  // Индексы на FK-колонки (CREATE TABLE + ALTER): без CONCURRENTLY — скрипт в транзакции.
+  // Составные FK пока пропускаем; дубли по колонкам (не по имени) не плодим.
+  const indexCovered = new Set(); // table.col
+  const collectIndexCols = (sqlChunk) => {
+    const re = /CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:["'`]?\w+["'`]?\s+)?ON\s+("[^"]+"|\w+)\s*\(\s*([^)]+)\)/gi;
+    let m;
+    while ((m = re.exec(sqlChunk || ""))) {
+      const t = normIdent(m[1]);
+      const cols = String(m[2]).split(",").map(c => normIdent(c)).filter(Boolean);
+      if (cols[0]) indexCovered.add(t + "." + cols[0]);
+    }
+  };
+  out.forEach(collectIndexCols);
+  collectIndexCols(text);
+
+  const fkIndexTargets = [];
+  const rememberFkCol = (table, colRaw) => {
+    const cols = String(colRaw || "").split(",").map(c => normIdent(c)).filter(Boolean);
+    if (cols.length !== 1) return;
+    const t = normIdent(table);
+    const col = cols[0];
+    if (!t || !col) return;
+    const key = t + "." + col;
+    if (indexCovered.has(key)) return;
+    if (fkIndexTargets.some(x => x.table === t && x.col === col)) return;
+    fkIndexTargets.push({ table: t, col });
+  };
+
+  createFkCols.forEach(f => rememberFkCol(f.table, f.col));
+  const alterFkRe = /ALTER\s+TABLE\s+("[^"]+"|\w+)\s+ADD\s+CONSTRAINT\s+\w+\s+FOREIGN\s+KEY\s*\(\s*([^)]+)\)/gi;
+  let af;
+  const allSqlForFk = out.join("\n");
+  while ((af = alterFkRe.exec(allSqlForFk))) rememberFkCol(af[1], af[2]);
+  addedFks.forEach(f => rememberFkCol(f.child, f.col));
+
+  const indexInjects = fkIndexTargets.map(({ table, col }) => {
+    indexCovered.add(table + "." + col);
+    const iname = `idx_${table}_${col}`.replace(/[^a-z0-9_]/gi, "_").slice(0, 60);
+    return `CREATE INDEX ${iname} ON ${spell(table)}(${col})`;
+  });
+
+  if (indexInjects.length) {
+    let insertAt = out.findIndex(s => /\b(COMMIT|ROLLBACK)\b/i.test(String(s)));
+    if (insertAt < 0) insertAt = out.length;
+    for (let i = 0; i < insertAt; i++) {
+      if (/ADD\s+CONSTRAINT\s+\w+\s+FOREIGN\s+KEY/i.test(out[i]) || /^CREATE\s+INDEX\b/i.test(String(out[i]).trim())) {
+        insertAt = i + 1;
+      }
+    }
+    out.splice(insertAt, 0, ...indexInjects);
   }
 
   // Собрать обратно, сохранив BEGIN/COMMIT структуру по возможности
