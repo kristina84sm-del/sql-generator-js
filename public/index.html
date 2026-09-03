@@ -1550,13 +1550,81 @@ function formatDDL(){
   const ta=document.getElementById("a_schema");
   if(!ta||!ta.value.trim())return;
   let s=ta.value;
+  s=s.replace(/\/\*[\s\S]*?\*\//g,"");
   s=s.replace(/--[^\n]*/g,"");
-  const kw=["create","table","primary","key","foreign","references","not","null","default","unique","index","on","delete","cascade","constraint","serial","integer","varchar","text","boolean","timestamp","numeric","bigint","int","if","exists"];
-  kw.forEach(w=>{s=s.replace(new RegExp("\\b"+w+"\\b","gi"),w.toUpperCase());});
+  const kw=["create","table","primary","key","foreign","references","not","null","default","unique","index","on","delete","cascade","constraint","serial","integer","varchar","character","varying","text","boolean","timestamp","timestamptz","numeric","decimal","bigint","smallint","int","if","exists","alter","add","drop","column","check","using","with","without","time","zone","double","precision","real","date","json","jsonb","uuid","bytea","money","interval","true","false","asc","desc","and","or","set","update","insert","into","values","select","from","where","join","left","right","inner","outer","group","by","order","limit","offset","having","as","is","in","like","between","distinct","count","sum","avg","min","max","coalesce","current_timestamp","now","gen_random_uuid","auto_increment","engine","charset","collate","comment","generated","always","identity","stored","virtual","unsigned","zerofill","enum","restrict","no","action","match","full","partial","simple","deferrable","initially","deferred","immediate","only","schema","database","use","temp","temporary","view","replace"];
+  const upperSqlKeywords=(text)=>{
+    const parts=text.split(/("[^"]*"|'[^']*')/g);
+    return parts.map((part,i)=>{
+      if(i%2===1)return part;
+      let out=part;
+      kw.forEach(w=>{out=out.replace(new RegExp("\\b"+w+"\\b","gi"),w.toUpperCase());});
+      return out;
+    }).join("");
+  };
+  s=upperSqlKeywords(s);
+  const splitCsv=(body)=>{
+    const items=[]; let cur="", depth=0;
+    for(let i=0;i<body.length;i++){
+      const ch=body[i];
+      if(ch==="("){depth++; cur+=ch; continue;}
+      if(ch===")"){depth=Math.max(0,depth-1); cur+=ch; continue;}
+      if(ch===","&&depth===0){items.push(cur.trim()); cur=""; continue;}
+      cur+=ch;
+    }
+    if(cur.trim())items.push(cur.trim());
+    return items.filter(Boolean);
+  };
+  const restoreMissingCommas=(body)=>{
+    const rawLines=body.split(/\n/).map(l=>l.trim()).filter(Boolean);
+    if(rawLines.length<=1)return body;
+    const looksLikeDef=(line)=>/^(CONSTRAINT\b|PRIMARY\s+KEY\b|FOREIGN\s+KEY\b|UNIQUE\b|CHECK\b|["`]?\w+["`]?\s+\w+)/i.test(line);
+    const isContinuation=(line)=>/^(REFERENCES\b|ON\s+(DELETE|UPDATE)\b|MATCH\b|NOT\s+DEFERRABLE\b|DEFERRABLE\b|INITIALLY\b)/i.test(line);
+    const out=[];
+    for(let i=0;i<rawLines.length;i++){
+      let line=rawLines[i].replace(/,+\s*$/,"");
+      out.push(line);
+      if(i<rawLines.length-1){
+        const next=rawLines[i+1].replace(/,+\s*$/,"");
+        if(looksLikeDef(line)&&looksLikeDef(next)&&!isContinuation(next)) out[out.length-1]=line+",";
+      }
+    }
+    return out.join("\n");
+  };
+  const formatTableBody=(body)=>{
+    const b=restoreMissingCommas(body);
+    const items=splitCsv(b).map(it=>it.replace(/\s+/g," ").trim()).filter(Boolean);
+    if(!items.length)return "\n";
+    return "\n"+items.map(it=>"  "+it).join(",\n")+"\n";
+  };
+  // CREATE TABLE с балансом скобок (чтобы CHECK (...) не обрезал тело)
+  let out="", i=0;
+  const re=/CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?[^\s(;]+/gi;
+  let m;
+  while((m=re.exec(s))!==null){
+    out+=s.slice(i,m.index);
+    const head=m[0];
+    let j=m.index+head.length;
+    while(j<s.length&&/\s/.test(s[j]))j++;
+    if(s[j]!=="("){out+=s.slice(m.index,m.index+head.length); i=m.index+head.length; continue;}
+    let depth=0, k=j;
+    for(;k<s.length;k++){
+      if(s[k]==="(")depth++;
+      else if(s[k]===")"){depth--; if(depth===0){k++; break;}}
+    }
+    const body=s.slice(j+1,k-1);
+    while(k<s.length&&/\s/.test(s[k]))k++;
+    if(s[k]===";")k++;
+    out+=head+" ("+formatTableBody(body)+");";
+    i=k;
+    re.lastIndex=i;
+  }
+  out+=s.slice(i);
+  s=out;
+  s=s.replace(/[ \t]+,/g,",");
+  s=s.replace(/,[ \t]+(?=\S)/g,", ");
   s=s.replace(/\n{3,}/g,"\n\n");
-  s=s.replace(/\s+,/g,",");
-  s=s.replace(/\(\s+/g,"(\n  ").replace(/\s+\)/g,"\n)");
-  ta.value=s.trim();
+  ta.value=s.trim()+"\n";
   ta.dispatchEvent(new Event("input"));
 }
 
@@ -2431,7 +2499,7 @@ const TOUR_STEPS=[
   {target:"#a_schema",pos:"below-field",title:"Поле схемы для аудита",
    desc:"Вставьте DDL, текстовое описание таблиц или Mermaid-код. Формат определяется автоматически. Лимит 6000 символов.",ex:null},
    {target:"#btn_format_ddl",pos:"bottom",title:"Кнопка «Привести к стандарту»",
-   desc:"Мгновенно (без ИИ) приводит код к единому стилю: UPPERCASE для ключевых слов, убирает комментарии, выравнивает отступы. Полезно перед вставкой кода, скопированного из разных источников.",ex:null},
+   desc:"Мгновенно (без ИИ) приводит DDL к единому стилю: UPPERCASE для ключевых слов, убирает комментарии, выравнивает отступы в CREATE TABLE и восстанавливает пропущенные запятые между полями. Полезно перед вставкой кода из разных источников.",ex:null},
   {target:"#btn_ocr_schema",pos:"bottom",title:"Кнопка «Распознать со скриншота»",
    desc:"Если у вас только картинка ER-диаграммы (например, скриншот из старого проекта или фото БД) — загрузите её, ИИ распознает таблицы и связи и превратит в DDL-код прямо в поле слева.",ex:null},
   {target:"#a_rules",pos:"bottom",title:"Бизнес-правила — опционально",
