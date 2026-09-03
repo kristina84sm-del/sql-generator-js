@@ -135,13 +135,18 @@ async function handleRegister(body, jwtSecret, userAgent, ipAddress) {
   try {
     await ensureSchema(client);
     const { hash, salt } = hashPassword(password);
-    
-    // 3. Модифицируем SQL-запрос: добавляем колонки и плейсхолдер $5 для Amvera
+
+    // Первый живой пользователь в БД становится администратором
+    const { rows: existing } = await client.query(
+      `SELECT COUNT(*)::int AS cnt FROM users WHERE deleted_at IS NULL`
+    );
+    const makeAdmin = (existing[0]?.cnt || 0) === 0;
+
     const res = await client.query(
-      `INSERT INTO users (username, email, password_hash, salt, privacy_consent, consent_date) 
-       VALUES ($1, $2, $3, $4, $5, NOW()) 
-       RETURNING id, username, email`,
-      [username, email, hash, salt, privacy_consent] // Передаем флаг пятым параметром
+      `INSERT INTO users (username, email, password_hash, salt, privacy_consent, consent_date, is_admin) 
+       VALUES ($1, $2, $3, $4, $5, NOW(), $6) 
+       RETURNING id, username, email, is_admin`,
+      [username, email, hash, salt, privacy_consent, makeAdmin]
     );
     
     const user = res.rows[0];
@@ -151,7 +156,13 @@ async function handleRegister(body, jwtSecret, userAgent, ipAddress) {
     );
     const sid = sessionRes.rows[0].id;
     const token = signToken({ sub: user.id, username: user.username, sid, exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 7 }, jwtSecret);
-    return { statusCode: 201, body: { token, user: { id: user.id, username: user.username, email: user.email } } };
+    return {
+      statusCode: 201,
+      body: {
+        token,
+        user: { id: user.id, username: user.username, email: user.email, is_admin: !!user.is_admin }
+      }
+    };
   } catch (e) {
     if (e.code === "23505") {
       const field = e.constraint?.includes("email") ? "Email" : "Имя пользователя";
@@ -173,7 +184,7 @@ async function handleLogin(body, jwtSecret, userAgent, ipAddress) {
   try {
     await ensureSchema(client);
     const res = await client.query(
-      "SELECT id, username, email, password_hash, salt FROM users WHERE (email=$1 OR username=$1) AND deleted_at IS NULL",
+      "SELECT id, username, email, password_hash, salt, is_admin FROM users WHERE (email=$1 OR username=$1) AND deleted_at IS NULL",
       [login]
     );
     if (res.rows.length === 0)
@@ -182,6 +193,20 @@ async function handleLogin(body, jwtSecret, userAgent, ipAddress) {
     const user = res.rows[0];
     if (!checkPassword(password, user.password_hash, user.salt))
       return { statusCode: 401, body: { error: "Неверный логин или пароль" } };
+
+    // Если админов ещё нет — повышаем текущего (например первый пользователь до фикса)
+    if (!user.is_admin) {
+      const promoted = await client.query(
+        `UPDATE users SET is_admin = TRUE
+         WHERE id = $1
+           AND NOT EXISTS (
+             SELECT 1 FROM users WHERE is_admin = TRUE AND deleted_at IS NULL
+           )
+         RETURNING is_admin`,
+        [user.id]
+      );
+      if (promoted.rows[0]?.is_admin) user.is_admin = true;
+    }
 
     const sessionRes = await client.query(
       `INSERT INTO auth_sessions (user_id, expires_at, user_agent, ip_address) VALUES ($1, NOW() + INTERVAL '7 days', $2, $3) RETURNING id`,
@@ -192,7 +217,7 @@ async function handleLogin(body, jwtSecret, userAgent, ipAddress) {
     return {
       statusCode: 200,
       token: token, // Прокидываем наружу для заголовков
-      body: { user: { id: user.id, username: user.username, email: user.email } }
+      body: { user: { id: user.id, username: user.username, email: user.email, is_admin: !!user.is_admin } }
     };
   } finally {
     await client.end();
