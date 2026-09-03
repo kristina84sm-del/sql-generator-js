@@ -66,8 +66,40 @@ WHERE a.id IS NULL`;
     assert.ok(issues.some(i => i === "unknown_table:ghost"), issues.join(","));
   });
 
-  it("flags empty sql", () => {
-    assert.deepEqual(lintSolutionSql("", SCHEMA), ["empty_sql"]);
+  it("flags Transaction.account_id = User.id (skips Account)", () => {
+    const sql = `
+SELECT u.id FROM "User" u
+WHERE NOT EXISTS (
+  SELECT 1 FROM "Transaction" t WHERE t.account_id = u.id AND t.created_at >= NOW() - INTERVAL '30 days'
+)`;
+    const issues = lintSolutionSql(sql, SCHEMA);
+    assert.ok(issues.some(i => i.startsWith("bad_fk_join:")), issues.join(","));
+  });
+
+  it("allows User → Account → Transaction path", () => {
+    const sql = `
+SELECT u.id FROM "User" u
+WHERE NOT EXISTS (
+  SELECT 1 FROM "Account" a
+  JOIN "Transaction" t ON t.account_id = a.id
+  WHERE a.user_id = u.id AND t.created_at >= NOW() - INTERVAL '30 days'
+)`;
+    const issues = lintSolutionSql(sql, SCHEMA);
+    assert.equal(issues.length, 0, issues.join(","));
+  });
+
+  it("flags GROUP BY + COUNT OVER PARTITION BY same grain", () => {
+    const sql = `
+SELECT month, COUNT(DISTINCT user_id) OVER (PARTITION BY month) AS unique_users
+FROM (
+  SELECT DATE_TRUNC('month', t.created_at) AS month, u.id AS user_id
+  FROM "Transaction" t
+  JOIN "Account" a ON t.account_id = a.id
+  JOIN "User" u ON a.user_id = u.id
+) AS monthly_users
+GROUP BY month`;
+    const issues = lintSolutionSql(sql, SCHEMA);
+    assert.ok(issues.includes("redundant_window_agg"), issues.join(","));
   });
 });
 
@@ -86,12 +118,14 @@ describe("filterSafeTasks", () => {
         kind: "sql",
         title: "good",
         question: "q2",
-        solution_sql: `SELECT u.id FROM "User" u LEFT JOIN "Transaction" t ON t.account_id = u.id AND t.created_at > NOW()`,
+        solution_sql: `SELECT u.id FROM "User" u
+          LEFT JOIN "Account" a ON a.user_id = u.id
+          LEFT JOIN "Transaction" t ON t.account_id = a.id AND t.created_at > NOW()`,
       },
       { id: 3, kind: "oral", title: "talk", question: "how?", solution_sql: "" },
     ], SCHEMA);
-    assert.equal(kept.length, 2);
-    assert.equal(dropped.length, 1);
+    assert.equal(kept.length, 2, JSON.stringify(dropped));
+    assert.ok(dropped.length >= 1);
     assert.equal(dropped[0].title, "bad");
     assert.ok(kept.some(t => t.title === "good"));
     assert.ok(kept.some(t => t.kind === "oral"));

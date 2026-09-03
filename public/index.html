@@ -2243,8 +2243,11 @@ async function doSqlTrainer(more){
   setGlobalBusy(true, more?"Добавляю ещё задания…":"Собираю задания тренажёра…");
   try{
   const seen=JSON.parse(sessionStorage.getItem("trainer_seen_titles")||"[]");
-  const avoidTitles=[...new Set([...(more?gTrainerTasks.map(t=>t.title).filter(Boolean):[]), ...seen])].slice(-40);
-  const avoidTopics=more?gTrainerTasks.map(t=>t.topic).filter(Boolean):[];
+  // На «ещё» нельзя слать все topic в avoid — при 10+ заданиях enum тем исчерпан, API вернёт пусто.
+  const avoidTitles=more
+    ? gTrainerTasks.map(t=>t.title).filter(Boolean).slice(-40)
+    : [...new Set([...seen])].slice(-40);
+  const avoidTopics=[];
     const res=await fetch("/generate_sql_trainer",{method:"POST",headers:hdrs(),credentials:"include",
       body:JSON.stringify({
         action: more?"more":"generate",
@@ -2261,8 +2264,19 @@ async function doSqlTrainer(more){
     if(!res.ok)throw new Error(data.error||"Ошибка");
     const incoming=data.tasks||[];
     if(more){
+      const have=new Set(gTrainerTasks.map(t=>String(t.title||"").toLowerCase()));
       const maxId=gTrainerTasks.reduce((m,t)=>Math.max(m, Number(t.id)||0),0);
-      incoming.forEach((t,i)=>{ t.id = maxId+i+1; gTrainerTasks.push(t); });
+      let added=0;
+      incoming.forEach(t=>{
+        const title=String(t.title||"").toLowerCase();
+        if(title && have.has(title)) return;
+        if(title) have.add(title);
+        added++;
+        t.id=maxId+added;
+        gTrainerTasks.push(t);
+      });
+      // Показать весь набор, включая новые (не оставлять фильтр «Окна»)
+      if(added) gTrainerTopicFilter="";
     } else {
       gTrainerTasks=incoming;
       gTrainerVerdicts={};
