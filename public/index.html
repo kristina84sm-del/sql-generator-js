@@ -2269,7 +2269,10 @@ async function doSqlTrainer(more){
       gTrainerTopicFilter="";
     }
     const intro=document.getElementById("tr_intro");
-    if(intro && (!more || data.intro)) intro.textContent=data.intro||intro.textContent||"";
+    if(intro && (!more || data.intro)){
+      const warn=(data.warnings&&data.warnings.length)?"\n\n⚠ "+data.warnings.join(" "):"";
+      intro.textContent=(data.intro||intro.textContent||"")+warn;
+    }
     renderTrainerTasks(gTrainerTasks);
     try{
       const titles=gTrainerTasks.map(t=>t.title).filter(Boolean);
