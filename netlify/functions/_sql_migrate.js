@@ -120,6 +120,27 @@ function parseOnDelete(line) {
   return m[1].replace(/\s+/g, " ").toUpperCase();
 }
 
+/** Тип колонки с поддержкой DECIMAL(10, 2) / VARCHAR(255) / DOUBLE PRECISION. */
+function extractColumnMeta(line) {
+  const raw = String(line || "").trim();
+  const m = raw.match(/^["'`]?(\w+)["'`]?\s+(.+)$/i);
+  if (!m || /^(PRIMARY|FOREIGN|CONSTRAINT|UNIQUE|CHECK|INDEX)$/i.test(m[1])) return null;
+  const col = m[1].toLowerCase();
+  let rest = m[2].trim();
+  const stop = rest.search(/\b(NOT\s+NULL|NULL|DEFAULT|PRIMARY|UNIQUE|CHECK|REFERENCES|COLLATE|GENERATED|CONSTRAINT|AUTO_INCREMENT|IDENTITY)\b/i);
+  let type = (stop >= 0 ? rest.slice(0, stop) : rest).trim().replace(/,\s*$/, "").trim();
+  if (!type) return null;
+  type = type.replace(/\s+/g, " ").toUpperCase();
+  return {
+    col,
+    type,
+    notNull: /\bNOT\s+NULL\b/i.test(rest),
+    unique: /\bUNIQUE\b/i.test(rest),
+    check: (/CHECK\s*\(/i.test(rest) && rest.match(/CHECK\s*\((.+)\)/i)) ? rest.match(/CHECK\s*\((.+)\)/i)[1] : null,
+    fk: /\bREFERENCES\b/i.test(rest),
+  };
+}
+
 function parseDdlTables(ddl) {
   const result = {};
   const tableRe = /CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:["'`]?[\w]+["'`]?\.)?["'`]?(\w+)["'`]?\s*\(([\s\S]*?)\)\s*;/gi;
@@ -140,21 +161,21 @@ function parseDdlTables(ddl) {
         uniques.push(line);
         return;
       }
-      const fkInline = line.match(/^["'`]?(\w+)["'`]?\s+[\w()]+[\s\S]*?\bREFERENCES\s+["'`]?(\w+)["'`]?\s*(?:\(\s*["'`]?(\w+)["'`]?\s*\))?/i);
+      const fkInline = line.match(/^["'`]?(\w+)["'`]?\s+[\w().,\s]+[\s\S]*?\bREFERENCES\s+["'`]?(\w+)["'`]?\s*(?:\(\s*["'`]?(\w+)["'`]?\s*\))?/i);
       const fkTable = line.match(/\bFOREIGN\s+KEY\s*\(\s*["'`]?(\w+)["'`]?\s*\)\s*REFERENCES\s+["'`]?(\w+)["'`]?\s*(?:\(\s*["'`]?(\w+)["'`]?\s*\))?/i);
       if (fkInline && !/^(PRIMARY|FOREIGN|CONSTRAINT|UNIQUE|CHECK|INDEX)$/i.test(fkInline[1])) {
         fks.push({ col: fkInline[1].toLowerCase(), parent: fkInline[2].toLowerCase(), parentCol: (fkInline[3] || "id").toLowerCase(), onDelete: parseOnDelete(line) });
       } else if (fkTable) {
         fks.push({ col: fkTable[1].toLowerCase(), parent: fkTable[2].toLowerCase(), parentCol: (fkTable[3] || "id").toLowerCase(), onDelete: parseOnDelete(line) });
       }
-      const colMatch = line.match(/^["'`]?(\w+)["'`]?\s+([\w()]+)/i);
-      if (colMatch && !/^(PRIMARY|FOREIGN|CONSTRAINT|UNIQUE|CHECK|INDEX)$/i.test(colMatch[1])) {
-        cols[colMatch[1].toLowerCase()] = {
-          type: colMatch[2].toUpperCase(),
-          notNull: /NOT\s+NULL/i.test(line),
-          unique: /\bUNIQUE\b/i.test(line),
-          check: (/CHECK\s*\(/i.test(line) && line.match(/CHECK\s*\((.+)\)/i)) ? line.match(/CHECK\s*\((.+)\)/i)[1] : null,
-          fk: /REFERENCES/i.test(line),
+      const meta = extractColumnMeta(line);
+      if (meta) {
+        cols[meta.col] = {
+          type: meta.type,
+          notNull: meta.notNull,
+          unique: meta.unique,
+          check: meta.check,
+          fk: meta.fk,
         };
       }
     });
@@ -166,9 +187,13 @@ function parseDdlTables(ddl) {
 /** Имена таблиц даже из обрезанного DDL (без закрывающего ); ). */
 function extractTableNames(ddl) {
   const names = new Set();
-  const re = /CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:["'`]?[\w]+["'`]?\.)?["'`]?(\w+)["'`]/gi;
+  // Не требуем кавычку ПОСЛЕ имени — иначе CREATE TABLE hotel ( не матчится.
+  const re = /CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:(?:"[^"]+"|[\w]+)\.)?(?:"([^"]+)"|([\w]+))/gi;
   let m;
-  while ((m = re.exec(ddl || ""))) names.add(m[1].toLowerCase());
+  while ((m = re.exec(ddl || ""))) {
+    const name = m[1] || m[2];
+    if (name) names.add(name.toLowerCase());
+  }
   return names;
 }
 
@@ -214,19 +239,40 @@ function buildSchemaDiff(oldDdl, newDdl) {
   return { addedCols, addedTables, droppedTables, addedFks, text: lines.join("\n") || "(явных отличий парсер не нашёл — всё равно сверь DDL построчно)" };
 }
 
+function identRe(name) {
+  const n = String(name || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return "(?:[\"'`]?)" + n + "(?:[\"'`]?)";
+}
+
+function sqlHasAlterColumn(sql, table, col) {
+  const re = new RegExp(
+    "alter\\s+table\\s+(?:[\\w.]+\\.)?" + identRe(table) + "\\s+[\\s\\S]{0,600}?\\b" + String(col).replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\b",
+    "i"
+  );
+  return re.test(sql || "");
+}
+
+function sqlHasFkReference(sql, child, parent, col) {
+  const re = new RegExp(
+    identRe(child) + "[\\s\\S]{0,2000}(?:foreign\\s+key\\s*\\(\\s*" + identRe(col) + "\\s*\\)|\\b" + String(col).replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\b[\\s\\S]{0,120})\\s*references\\s+" + identRe(parent),
+    "i"
+  );
+  return re.test(sql || "");
+}
+
+function sqlHasCreateTable(sql, table) {
+  return new RegExp("create\\s+table\\s+(?:if\\s+not\\s+exists\\s+)?" + identRe(table) + "\\b", "i").test(sql || "");
+}
+
 function ensureAltersFromDiff(sql, diff) {
   if (!sql || !diff || !diff.addedCols.length) return sql;
-  const lower = sql.toLowerCase();
-  const missing = diff.addedCols.filter(a => {
-    const t = a.table.toLowerCase();
-    const c = a.col.toLowerCase();
-    const re = new RegExp("alter\\s+table\\s+(?:[\\w.]+\\.)?" + t + "\\b[\\s\\S]{0,400}\\b" + c + "\\b", "i");
-    return !re.test(lower);
-  });
+  const missing = diff.addedCols.filter(a => !sqlHasAlterColumn(sql, a.table, a.col));
   if (!missing.length) return sql;
-  const stmts = missing.map(a =>
-    `ALTER TABLE ${a.table} ADD COLUMN ${a.col} ${a.type}${a.notNull ? " NOT NULL" : ""}; -- причина: новое поле (чеклист SCHEMA_DIFF)`
-  ).join("\n");
+  // Для существующих таблиц не вшиваем NOT NULL без DEFAULT — иначе падает на данных.
+  const stmts = missing.map(a => {
+    const type = a.type || "TEXT";
+    return `ALTER TABLE ${a.table} ADD COLUMN ${a.col} ${type}; -- новое поле`;
+  }).join("\n");
   if (/-- ШАГ 1:/i.test(sql)) return sql.replace(/(-- ШАГ 1:[^\n]*\n)/i, `$1${stmts}\n`);
   if (/COMMIT\s*;|ROLLBACK\s*;/i.test(sql)) return sql.replace(/\n(?=(COMMIT|ROLLBACK)\s*;)/i, "\n" + stmts + "\n");
   return sql + "\n" + stmts + "\n";
@@ -234,18 +280,176 @@ function ensureAltersFromDiff(sql, diff) {
 
 function ensureFksFromDiff(sql, diff) {
   if (!sql || !diff || !diff.addedFks || !diff.addedFks.length) return sql;
-  const lower = sql.toLowerCase();
   const missing = diff.addedFks.filter(f => {
-    const re = new RegExp(f.child + "[\\s\\S]{0,1200}references\\s+" + f.parent, "i");
-    return !re.test(lower);
+    // Уже есть FK в CREATE/ALTER (в т.ч. REFERENCES "Parent")
+    if (sqlHasFkReference(sql, f.child, f.parent, f.col)) return false;
+    return true;
   });
   if (!missing.length) return sql;
   const stmts = missing.map(f =>
-    `ALTER TABLE ${f.child} ADD CONSTRAINT fk_${f.child}_${f.col} FOREIGN KEY (${f.col}) REFERENCES ${f.parent}(${f.parentCol || "id"}); -- причина: FK из NEW_SCHEMA`
+    `ALTER TABLE ${f.child} ADD CONSTRAINT fk_${f.child}_${f.col} FOREIGN KEY (${f.col}) REFERENCES ${f.parent}(${f.parentCol || "id"}); -- FK`
   ).join("\n");
   if (/-- ШАГ 5:/i.test(sql)) return sql.replace(/(-- ШАГ 5:[^\n]*\n)/i, `$1${stmts}\n`);
   if (/COMMIT\s*;|ROLLBACK\s*;/i.test(sql)) return sql.replace(/\n(?=(COMMIT|ROLLBACK)\s*;)/i, "\n" + stmts + "\n");
   return sql + "\n" + stmts + "\n";
+}
+
+const PG_RESERVED = new Set([
+  "user", "limit", "order", "group", "table", "check", "key", "offset", "select", "from", "where",
+  "grant", "revoke", "session_user", "current_user", "authorization",
+]);
+
+function quoteIdentIfNeeded(name) {
+  const raw = String(name || "").replace(/^["'`]+|["'`]+$/g, "");
+  if (!raw) return name;
+  if (PG_RESERVED.has(raw.toLowerCase()) || /[A-Z]/.test(raw)) return `"${raw}"`;
+  return raw.toLowerCase();
+}
+
+function normIdent(name) {
+  return String(name || "").replace(/^["'`]+|["'`]+$/g, "").toLowerCase();
+}
+
+/**
+ * Пост-очистка сырого migration_sql: чинит типы, дубли, безымянные CONSTRAINT,
+ * NOT NULL без DEFAULT на существующих таблицах, кавычки reserved.
+ */
+function cleanupMigrationSql(sql, opts) {
+  if (!sql) return sql;
+  const oldNames = new Set([...(opts && opts.oldTableNames ? opts.oldTableNames : [])].map(normIdent));
+  let text = String(sql);
+
+  // 1) Починить обрезанные DECIMAL/NUMERIC(n
+  text = text.replace(/\b(DECIMAL|NUMERIC)\s*\(\s*(\d+)\s+(NOT\s+NULL|NULL|DEFAULT)/gi, "$1($2, 2) $3");
+  text = text.replace(/\b(DECIMAL|NUMERIC)\s*\(\s*(\d+)\s*;/gi, "$1($2, 2);");
+
+  // 2) ADD CONSTRAINT FOREIGN KEY → ADD CONSTRAINT fk_… FOREIGN KEY
+  text = text.replace(
+    /ALTER\s+TABLE\s+([^\s;]+)\s+ADD\s+CONSTRAINT\s+FOREIGN\s+KEY\s*\(\s*([^)]+?)\s*\)\s*REFERENCES\s+([^\s(;]+)\s*(?:\(([^)]*)\))?([^;]*);/gi,
+    (_, table, cols, parent, pcol, rest) => {
+      const t = normIdent(table);
+      const c = normIdent(String(cols).split(",")[0]);
+      const pname = `fk_${t}_${c}`.replace(/[^a-z0-9_]/gi, "_").slice(0, 60);
+      const pref = pcol ? `(${pcol})` : "(id)";
+      return `ALTER TABLE ${table} ADD CONSTRAINT ${pname} FOREIGN KEY (${cols}) REFERENCES ${parent}${pref}${rest || ""};`;
+    }
+  );
+
+  // 3) Разбить на statements и вычистить дубли / опасный NOT NULL
+  const parts = [];
+  let buf = "";
+  let inS = false, inD = false, inLine = false, inBlock = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i], n = text[i + 1];
+    if (inLine) { buf += c; if (c === "\n") inLine = false; continue; }
+    if (inBlock) { buf += c; if (c === "*" && n === "/") { buf += "/"; i++; inBlock = false; } continue; }
+    if (inS) { buf += c; if (c === "'" && n === "'") { buf += "'"; i++; } else if (c === "'") inS = false; continue; }
+    if (inD) { buf += c; if (c === '"') inD = false; continue; }
+    if (c === "-" && n === "-") { buf += c; inLine = true; continue; }
+    if (c === "/" && n === "*") { buf += c; inBlock = true; continue; }
+    if (c === "'") { inS = true; buf += c; continue; }
+    if (c === '"') { inD = true; buf += c; continue; }
+    if (c === ";") { parts.push(buf.trim()); buf = ""; continue; }
+    buf += c;
+  }
+  if (buf.trim()) parts.push(buf.trim());
+
+  const createFkKeys = new Set();
+  const createTables = new Set();
+  parts.forEach(p => {
+    const cm = p.match(/CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?["'`]?(\w+)["'`]?/i);
+    if (cm) {
+      createTables.add(cm[1].toLowerCase());
+      const body = p.match(/\(([\s\S]*)\)\s*$/);
+      if (body) {
+        const re = /REFERENCES\s+["'`]?(\w+)["'`]/gi;
+        let r;
+        while ((r = re.exec(body[1]))) {
+          const col = (body[1].slice(Math.max(0, r.index - 80), r.index).match(/["'`]?(\w+)["'`]?\s*$/) || [])[1];
+          createFkKeys.add(cm[1].toLowerCase() + ">" + (col || "").toLowerCase() + ">" + r[1].toLowerCase());
+          createFkKeys.add(cm[1].toLowerCase() + ">>" + r[1].toLowerCase());
+        }
+      }
+    }
+  });
+
+  const seenAlterCol = new Set();
+  const seenFkAlter = new Set();
+  const out = [];
+
+  for (let p of parts) {
+    // убрать внутренние пометки генератора
+    p = p.replace(/\s*--\s*причина:[^\n]*/gi, "");
+    p = p.replace(/\s*--\s*новое поле[^\n]*/gi, "");
+    p = p.replace(/\s*--\s*FK\s*$/gim, "");
+
+    const alterCol = p.match(/^ALTER\s+TABLE\s+([^\s]+)\s+ADD\s+COLUMN\s+["'`]?(\w+)["'`]?\s+(.+)$/i);
+    if (alterCol) {
+      let tableTok = alterCol[1];
+      const col = alterCol[2].toLowerCase();
+      let rest = alterCol[3].trim().replace(/;?\s*$/, "");
+      const tNorm = normIdent(tableTok);
+      // единый стиль: если в скрипте есть CREATE "Card" — не плодим card
+      const key = tNorm + "." + col;
+      if (seenAlterCol.has(key)) continue;
+      seenAlterCol.add(key);
+
+      if (PG_RESERVED.has(tNorm) && !/^["`]/.test(tableTok)) tableTok = `"${tNorm}"`;
+
+      // починить тип DECIMAL(10
+      rest = rest.replace(/^(DECIMAL|NUMERIC)\s*\(\s*(\d+)\s*(?=\s+NOT\s+NULL|\s+NULL|\s+DEFAULT|$)/i, "$1($2, 2)");
+
+      // существующая таблица + NOT NULL без DEFAULT → убрать NOT NULL (безопаснее для данных)
+      const isExisting = oldNames.has(tNorm) || (!createTables.has(tNorm) && oldNames.size > 0);
+      if (isExisting && /\bNOT\s+NULL\b/i.test(rest) && !/\bDEFAULT\b/i.test(rest)) {
+        rest = rest.replace(/\bNOT\s+NULL\b/gi, "").replace(/\s{2,}/g, " ").trim();
+      }
+
+      out.push(`ALTER TABLE ${tableTok} ADD COLUMN ${col} ${rest}`);
+      continue;
+    }
+
+    const alterFk = p.match(/^ALTER\s+TABLE\s+([^\s]+)\s+ADD\s+CONSTRAINT\s+(\w+)\s+FOREIGN\s+KEY\s*\(\s*([^)]+)\)\s*REFERENCES\s+([^\s(;]+)(?:\(([^)]*)\))?(.*)$/i);
+    const alterFkAnon = p.match(/^ALTER\s+TABLE\s+([^\s]+)\s+ADD\s+(?:CONSTRAINT\s+)?FOREIGN\s+KEY/i);
+    if (alterFk || alterFkAnon) {
+      const tableTok = alterFk ? alterFk[1] : (p.match(/ALTER\s+TABLE\s+([^\s]+)/i) || [])[1];
+      const tNorm = normIdent(tableTok);
+      const cols = alterFk ? alterFk[3] : ((p.match(/FOREIGN\s+KEY\s*\(\s*([^)]+)\)/i) || [])[1] || "");
+      const parent = alterFk ? alterFk[4] : ((p.match(/REFERENCES\s+([^\s(;]+)/i) || [])[1] || "");
+      const col0 = normIdent(String(cols).split(",")[0]);
+      const pNorm = normIdent(parent);
+      const fkKey = tNorm + ">" + col0 + ">" + pNorm;
+
+      // FK уже в CREATE этой (новой) таблицы — ALTER не нужен
+      if (createTables.has(tNorm) && (createFkKeys.has(fkKey) || createFkKeys.has(tNorm + ">>" + pNorm))) continue;
+      if (seenFkAlter.has(fkKey)) continue;
+      seenFkAlter.add(fkKey);
+
+      if (alterFk) {
+        let stmt = p.replace(/;?\s*$/, "");
+        if (PG_RESERVED.has(tNorm) && !/^["`]/.test(tableTok)) {
+          stmt = stmt.replace(/ALTER\s+TABLE\s+[^\s]+/i, `ALTER TABLE "${tNorm}"`);
+        }
+        if (PG_RESERVED.has(pNorm) && parent && !/^["`]/.test(parent)) {
+          stmt = stmt.replace(new RegExp("REFERENCES\\s+" + parent.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\b", "i"), `REFERENCES "${pNorm}"`);
+        }
+        out.push(stmt);
+      } else {
+        // безымянный — уже должны были починить regex выше; если остался — дропаем как мусор
+        continue;
+      }
+      continue;
+    }
+
+    out.push(p.replace(/;?\s*$/, ""));
+  }
+
+  // Собрать обратно, сохранив BEGIN/COMMIT структуру по возможности
+  let body = out.map(s => /;\s*$/.test(s) ? s : s + ";").join("\n\n");
+  if (!/^\s*BEGIN/i.test(body) && /^\s*BEGIN/i.test(text)) body = "BEGIN;\n\n" + body;
+  if (!/\bCOMMIT\s*;|\bROLLBACK\s*;/i.test(body) && /\bCOMMIT\s*;/i.test(text)) body += "\n\nCOMMIT;";
+  if (!/\bCOMMIT\s*;|\bROLLBACK\s*;/i.test(body) && /\bROLLBACK\s*;/i.test(text)) body += "\n\nROLLBACK;";
+  return body.trim() + "\n";
 }
 
 function sqlCodeOnly(sql) {
@@ -263,6 +467,12 @@ function lintMigrationSql(sql, dialect) {
   }
   if ((sql.match(/\bSTART\s+TRANSACTION\b|\bBEGIN\b/gi) || []).length && !/\bCOMMIT\b|\bROLLBACK\b/i.test(sql)) {
     warnings.push("Транзакция без COMMIT/ROLLBACK");
+  }
+  if (/\b(DECIMAL|NUMERIC)\s*\(\s*\d+\s+(NOT\s+NULL|NULL)/i.test(code)) {
+    warnings.push("Обнаружен обрезанный DECIMAL/NUMERIC — проверьте типы колонок");
+  }
+  if (/ADD\s+CONSTRAINT\s+FOREIGN\s+KEY/i.test(code)) {
+    warnings.push("ADD CONSTRAINT без имени ограничения");
   }
   return warnings;
 }
@@ -368,10 +578,12 @@ module.exports = {
   mysqlVarcharLen,
   sanitizeTargetDialectSql,
   parseDdlTables,
+  extractColumnMeta,
   extractTableNames,
   buildSchemaDiff,
   ensureAltersFromDiff,
   ensureFksFromDiff,
+  cleanupMigrationSql,
   lintMigrationSql,
   dialectTypeHeader,
   ddlTransactionalNote,
