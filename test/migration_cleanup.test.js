@@ -289,6 +289,87 @@ CREATE TABLE "Notification" (id SERIAL PRIMARY KEY, user_id INT, FOREIGN KEY (us
   });
 });
 
+describe("cleanup drops bogus INSERT and moves FK to step 5", () => {
+  const dirty = `
+BEGIN;
+CREATE TABLE "Transaction" (
+  id SERIAL PRIMARY KEY,
+  account_id INT NOT NULL,
+  type VARCHAR(50) NOT NULL,
+  amount DECIMAL(10, 2) NOT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (account_id) REFERENCES "Account"(id) ON DELETE CASCADE
+);
+CREATE TABLE "Notification" (
+  id SERIAL PRIMARY KEY,
+  user_id INT NOT NULL,
+  message TEXT NOT NULL,
+  is_read BOOLEAN DEFAULT FALSE,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (user_id) REFERENCES "User"(id) ON DELETE CASCADE
+);
+ALTER TABLE "Card" ADD COLUMN account_id INT;
+ALTER TABLE "Limit" ADD COLUMN account_id INT;
+ALTER TABLE "Limit" ADD COLUMN daily_limit DECIMAL(10, 2);
+
+-- ШАГ 2: Перенос
+INSERT INTO "Transaction" (account_id, type, amount, created_at)
+SELECT account_id, type, amount, created_at FROM "Account";
+
+INSERT INTO "Notification" (user_id, message, is_read, created_at)
+SELECT user_id, message, is_read, created_at FROM "User";
+
+ALTER TABLE "Card" ADD CONSTRAINT fk_card_account_id FOREIGN KEY (account_id) REFERENCES "Account"(id) ON DELETE CASCADE;
+ALTER TABLE "Limit" ADD CONSTRAINT fk_limit_account_id FOREIGN KEY (account_id) REFERENCES "Account"(id) ON DELETE CASCADE;
+CREATE INDEX idx_transaction_account_id ON "Transaction"(account_id);
+CREATE INDEX idx_notification_user_id ON "Notification"(user_id);
+CREATE INDEX idx_card_account_id ON "Card"(account_id);
+CREATE INDEX idx_limit_account_id ON "Limit"(account_id);
+
+-- ШАГ 5: Constraints на существующих таблицах
+COMMIT;
+`;
+
+  const oldDdl = `
+CREATE TABLE "User" (id SERIAL PRIMARY KEY, email VARCHAR(255));
+CREATE TABLE "Account" (id SERIAL PRIMARY KEY, balance DECIMAL(10,2));
+CREATE TABLE "Card" (id SERIAL PRIMARY KEY);
+CREATE TABLE "Limit" (id SERIAL PRIMARY KEY);
+`;
+
+  it("removes INSERT…SELECT with columns missing on source tables", () => {
+    const out = cleanupMigrationSql(dirty, { oldSchema: oldDdl, oldTableNames: ["user", "account", "card", "limit"] });
+    assert.doesNotMatch(out, /INSERT\s+INTO\s+"Transaction"/i);
+    assert.doesNotMatch(out, /INSERT\s+INTO\s+"Notification"/i);
+    assert.match(out, /пропущено:\s*INSERT\s+FROM\s+"Account"/i);
+    assert.match(out, /пропущено:\s*INSERT\s+FROM\s+"User"/i);
+  });
+
+  it("moves FK and indexes to step 5 after step 2 area", () => {
+    const out = cleanupMigrationSql(dirty, {
+      oldSchema: oldDdl,
+      oldTableNames: ["user", "account", "card", "limit"],
+      schemaDiff: buildSchemaDiff(oldDdl, oldDdl + `
+CREATE TABLE "Transaction" (id INT, account_id INT);
+CREATE TABLE "Notification" (id INT, user_id INT);
+CREATE TABLE "Card" (id INT, account_id INT);
+CREATE TABLE "Limit" (id INT, account_id INT, daily_limit DECIMAL(10,2));
+`),
+    });
+    const step2 = out.search(/ШАГ\s*2/i);
+    const cardFk = out.search(/fk_card_account_id/i);
+    const step5 = out.search(/ШАГ\s*5/i);
+    const commitIdx = out.search(/\bCOMMIT\s*;/i);
+    assert.ok(cardFk > step2, "FK after step 2 marker");
+    assert.ok(step5 < 0 || cardFk > step5 || cardFk > step2, "FK near step 5");
+    assert.ok(cardFk < commitIdx && cardFk >= 0);
+    // после вырезания INSERT не должно быть FK сразу после ADD COLUMN без шага 5
+    const addColEnd = out.search(/ADD\s+COLUMN\s+daily_limit/i);
+    const between = out.slice(addColEnd, cardFk);
+    assert.doesNotMatch(between, /INSERT\s+INTO/i);
+  });
+});
+
 describe("ensureFks skips new tables and quoted REFERENCES", () => {
   it("does not inject ALTER FK when CREATE already has REFERENCES \"Parent\"", () => {
     const oldDdl = `CREATE TABLE "Account" (id INT PRIMARY KEY);`;

@@ -341,13 +341,105 @@ function normIdent(name) {
   return String(name || "").replace(/^["'`]+|["'`]+$/g, "").toLowerCase();
 }
 
+/** Имена колонок из SELECT-списка (пропускаем литералы и выражения с скобками). */
+function bareSelectColumnNames(selectExpr) {
+  const cols = [];
+  let depth = 0, cur = "";
+  const s = String(selectExpr || "");
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (c === "(") { depth++; cur += c; continue; }
+    if (c === ")") { depth = Math.max(0, depth - 1); cur += c; continue; }
+    if (c === "," && depth === 0) {
+      cols.push(cur.trim());
+      cur = "";
+      continue;
+    }
+    cur += c;
+  }
+  if (cur.trim()) cols.push(cur.trim());
+  const names = [];
+  cols.forEach(raw => {
+    let t = raw.replace(/\s+AS\s+["'`]?\w+["'`]?\s*$/i, "").trim();
+    if (/^null$/i.test(t) || /^true$/i.test(t) || /^false$/i.test(t)) return;
+    if (/^[\d.]+$/.test(t) || /^'/.test(t) || /^\$/.test(t)) return;
+    if (/\(|\)/.test(t) || /^CURRENT_/i.test(t) || /^NEXTVAL\b/i.test(t)) return;
+    const m = t.match(/^(?:["'`]?\w+["'`]?\.)?["'`]?(\w+)["'`]?$/i);
+    if (m) names.push(m[1].toLowerCase());
+  });
+  return names;
+}
+
+/**
+ * INSERT…SELECT валиден, если все «голые» колонки SELECT есть у FROM-таблицы в OLD (или NEW).
+ * null = не удалось разобрать / нет схемы — не трогаем.
+ */
+function validateInsertSelectAgainstSchema(stmt, oldTables, newTables) {
+  const code = String(stmt || "").replace(/^(?:\s*--[^\n]*\n)+/, "").trim();
+  const m = code.match(
+    /^INSERT\s+INTO\s+("[^"]+"|\w+)\s*(?:\(([^)]*)\))?\s*SELECT\s+([\s\S]+?)\s+FROM\s+("[^"]+"|\w+)/i
+  );
+  if (!m) return { ok: true, skipped: false };
+  const from = normIdent(m[4]);
+  const selectCols = bareSelectColumnNames(m[3]);
+  if (!selectCols.length) return { ok: true, skipped: false };
+  const info = (oldTables && oldTables[from]) || (newTables && newTables[from]);
+  if (!info || !info.cols) {
+    // Есть OLD-схема, но таблицы-источника в ней нет и это не новая CREATE — подозрительно
+    if (oldTables && Object.keys(oldTables).length && !(newTables && newTables[from])) {
+      return { ok: false, skipped: true, from, missing: selectCols, reason: "source_table_unknown" };
+    }
+    return { ok: true, skipped: false };
+  }
+  const known = new Set(Object.keys(info.cols));
+  const missing = selectCols.filter(c => !known.has(c));
+  if (missing.length) return { ok: false, skipped: true, from, missing, reason: "missing_columns" };
+  return { ok: true, skipped: false };
+}
+
+/** Все ADD CONSTRAINT FK и CREATE INDEX — в ШАГ 5 (после backfill). */
+function relocateFksAndIndexesToStep5(statements) {
+  const fks = [];
+  const idxs = [];
+  const rest = [];
+  const seenFk = new Set();
+  const seenIdx = new Set();
+  statements.forEach(s => {
+    const code = String(s || "").replace(/^(?:\s*--[^\n]*\n)+/, "").trim();
+    if (/^ALTER\s+TABLE\s+\S+\s+ADD\s+CONSTRAINT\s+\w+\s+FOREIGN\s+KEY/i.test(code)) {
+      const key = code.replace(/\s+/g, " ").toLowerCase();
+      if (!seenFk.has(key)) { seenFk.add(key); fks.push(code); }
+      return;
+    }
+    if (/^CREATE\s+(?:UNIQUE\s+)?INDEX\b/i.test(code)) {
+      const key = code.replace(/\s+/g, " ").toLowerCase();
+      if (!seenIdx.has(key)) { seenIdx.add(key); idxs.push(code); }
+      return;
+    }
+    rest.push(s);
+  });
+  if (!fks.length && !idxs.length) return statements;
+  // Перед COMMIT/ROLLBACK; если есть отдельный комментарий ШАГ 5 — сразу после него
+  let insertAt = rest.findIndex(s => /\b(COMMIT|ROLLBACK)\b/i.test(String(s)));
+  if (insertAt < 0) insertAt = rest.length;
+  const step5Only = rest.findIndex((s, i) =>
+    i < insertAt && /--\s*ШАГ\s*5:/i.test(String(s)) && !/\b(COMMIT|ROLLBACK)\b/i.test(String(s))
+  );
+  if (step5Only >= 0) insertAt = step5Only + 1;
+  rest.splice(insertAt, 0, ...fks, ...idxs);
+  return rest;
+}
+
 /**
  * Пост-очистка сырого migration_sql: чинит типы, дубли, безымянные CONSTRAINT,
- * снимает NOT NULL без DEFAULT у ADD COLUMN, кавычки reserved, дописывает FK из schemaDiff.
+ * снимает NOT NULL без DEFAULT у ADD COLUMN, кавычки reserved, дописывает FK из schemaDiff,
+ * выкидывает INSERT…SELECT с несуществующими колонками, FK/INDEX → шаг 5.
  */
 function cleanupMigrationSql(sql, opts) {
   if (!sql) return sql;
   let text = String(sql);
+  const oldTables = parseDdlTables((opts && opts.oldSchema) || "");
+  const newTables = parseDdlTables((opts && opts.newSchema) || "");
 
   // 1) Починить обрезанные DECIMAL/NUMERIC(n
   text = text.replace(/\b(DECIMAL|NUMERIC)\s*\(\s*(\d+)\s+(NOT\s+NULL|NULL|DEFAULT)/gi, "$1($2, 2) $3");
@@ -437,6 +529,17 @@ function cleanupMigrationSql(sql, opts) {
     const stmt = p.slice(leadComments.length).trim();
     const keepLead = leadComments.trim() ? leadComments.trim() + "\n" : "";
 
+    // INSERT…SELECT с колонками, которых нет у источника в OLD_SCHEMA — выкинуть
+    if (/^INSERT\s+INTO\b/i.test(stmt)) {
+      const v = validateInsertSelectAgainstSchema(stmt, oldTables, newTables);
+      if (v.skipped) {
+        out.push(
+          `${keepLead}-- пропущено: INSERT FROM "${v.from}" — нет колонок: ${(v.missing || []).join(", ")} (нет в схеме источника)`.trim()
+        );
+        continue;
+      }
+    }
+
     const alterCol = stmt.match(/^ALTER\s+TABLE\s+("[^"]+"|[^\s]+)\s+ADD\s+COLUMN\s+["'`]?(\w+)["'`]?\s+(.+)$/i);
     if (alterCol) {
       let tableTok = alterCol[1];
@@ -483,8 +586,9 @@ function cleanupMigrationSql(sql, opts) {
         ? alterFk[2]
         : `fk_${tNorm}_${col0}`.replace(/[^a-z0-9_]/gi, "_").slice(0, 60);
       const pcol = (alterFk && alterFk[5]) ? `(${alterFk[5]})` : "(id)";
+      // FK на существующих таблицах — уедут в ШАГ 5 через relocateFksAndIndexesToStep5
       out.push(
-        `${keepLead}ALTER TABLE ${spell(tableTok)} ADD CONSTRAINT ${cname} FOREIGN KEY (${cols}) REFERENCES ${spell(parent)}${pcol}${onDelSql}`.trim()
+        `ALTER TABLE ${spell(tableTok)} ADD CONSTRAINT ${cname} FOREIGN KEY (${cols}) REFERENCES ${spell(parent)}${pcol}${onDelSql}`
       );
       continue;
     }
@@ -599,7 +703,6 @@ function cleanupMigrationSql(sql, opts) {
   if (indexInjects.length) {
     let insertAt = out.findIndex(s => /\b(COMMIT|ROLLBACK)\b/i.test(String(s)));
     if (insertAt < 0) insertAt = out.length;
-    // строго ПОСЛЕ последнего FK, иначе индексы вклиниваются между двумя ADD CONSTRAINT
     let afterFk = -1;
     for (let i = 0; i < insertAt; i++) {
       if (/ADD\s+CONSTRAINT\s+\w+\s+FOREIGN\s+KEY/i.test(out[i])) afterFk = i + 1;
@@ -608,8 +711,11 @@ function cleanupMigrationSql(sql, opts) {
     out.splice(insertAt, 0, ...indexInjects);
   }
 
+  // FK и INDEX всегда в ШАГ 5 (после data/backfill), даже если модель вставила их в ШАГ 2
+  const ordered = relocateFksAndIndexesToStep5(out);
+
   // Собрать обратно, сохранив BEGIN/COMMIT структуру по возможности
-  let body = out.map(s => /;\s*$/.test(s) ? s : s + ";").join("\n\n");
+  let body = ordered.map(s => /;\s*$/.test(s) ? s : s + ";").join("\n\n");
   if (!/^\s*BEGIN/i.test(body) && /^\s*BEGIN/i.test(text)) body = "BEGIN;\n\n" + body;
   if (!/\bCOMMIT\s*;|\bROLLBACK\s*;/i.test(body) && /\bCOMMIT\s*;/i.test(text)) body += "\n\nCOMMIT;";
   if (!/\bCOMMIT\s*;|\bROLLBACK\s*;/i.test(body) && /\bROLLBACK\s*;/i.test(text)) body += "\n\nROLLBACK;";
@@ -756,4 +862,6 @@ module.exports = {
   lintIntegritySql,
   quoteReservedTableIdents,
   lintReservedIdents,
+  validateInsertSelectAgainstSchema,
+  relocateFksAndIndexesToStep5,
 };
