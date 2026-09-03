@@ -212,6 +212,83 @@ COMMIT;
   });
 });
 
+describe("infer FK when NEW DDL has account_id without REFERENCES", () => {
+  const userSql = `
+BEGIN;
+CREATE TABLE "Transaction" (
+  id SERIAL PRIMARY KEY,
+  account_id INT NOT NULL,
+  FOREIGN KEY (account_id) REFERENCES "Account"(id) ON DELETE CASCADE
+);
+CREATE TABLE "Notification" (
+  id SERIAL PRIMARY KEY,
+  user_id INT NOT NULL,
+  FOREIGN KEY (user_id) REFERENCES "User"(id) ON DELETE CASCADE
+);
+ALTER TABLE "Card" ADD COLUMN account_id INT;
+ALTER TABLE "Limit" ADD COLUMN account_id INT;
+ALTER TABLE "Limit" ADD COLUMN daily_limit DECIMAL(10, 2);
+-- ШАГ 5: Constraints на существующих таблицах
+COMMIT;
+`;
+
+  it("buildSchemaDiff infers FK from *_id + known parent table", () => {
+    const oldDdl = `
+CREATE TABLE "User" (id SERIAL PRIMARY KEY);
+CREATE TABLE "Account" (id SERIAL PRIMARY KEY);
+CREATE TABLE "Card" (id SERIAL PRIMARY KEY);
+CREATE TABLE "Limit" (id SERIAL PRIMARY KEY);
+`;
+    const newDdl = `
+CREATE TABLE "User" (id SERIAL PRIMARY KEY);
+CREATE TABLE "Account" (id SERIAL PRIMARY KEY);
+CREATE TABLE "Card" (id SERIAL PRIMARY KEY, account_id INT NOT NULL);
+CREATE TABLE "Limit" (id SERIAL PRIMARY KEY, account_id INT NOT NULL, daily_limit DECIMAL(10,2) NOT NULL);
+CREATE TABLE "Transaction" (id SERIAL PRIMARY KEY, account_id INT NOT NULL, FOREIGN KEY (account_id) REFERENCES "Account"(id) ON DELETE CASCADE);
+CREATE TABLE "Notification" (id SERIAL PRIMARY KEY, user_id INT NOT NULL, FOREIGN KEY (user_id) REFERENCES "User"(id) ON DELETE CASCADE);
+`;
+    const diff = buildSchemaDiff(oldDdl, newDdl);
+    const cardFk = diff.addedFks.find(f => f.child === "card" && f.col === "account_id");
+    const limitFk = diff.addedFks.find(f => f.child === "limit" && f.col === "account_id");
+    assert.ok(cardFk, "inferred card.account_id FK");
+    assert.ok(limitFk, "inferred limit.account_id FK");
+    assert.equal(cardFk.parent, "account");
+  });
+
+  it("cleanup injects FK+indexes for Card/Limit even when NEW has no REFERENCES", () => {
+    const oldDdl = `
+CREATE TABLE "User" (id SERIAL PRIMARY KEY);
+CREATE TABLE "Account" (id SERIAL PRIMARY KEY);
+CREATE TABLE "Card" (id SERIAL PRIMARY KEY);
+CREATE TABLE "Limit" (id SERIAL PRIMARY KEY);
+`;
+    const newDdl = `
+CREATE TABLE "User" (id SERIAL PRIMARY KEY);
+CREATE TABLE "Account" (id SERIAL PRIMARY KEY);
+CREATE TABLE "Card" (id SERIAL PRIMARY KEY, account_id INT NOT NULL);
+CREATE TABLE "Limit" (id SERIAL PRIMARY KEY, account_id INT NOT NULL, daily_limit DECIMAL(10,2));
+CREATE TABLE "Transaction" (id SERIAL PRIMARY KEY, account_id INT, FOREIGN KEY (account_id) REFERENCES "Account"(id) ON DELETE CASCADE);
+CREATE TABLE "Notification" (id SERIAL PRIMARY KEY, user_id INT, FOREIGN KEY (user_id) REFERENCES "User"(id) ON DELETE CASCADE);
+`;
+    const diff = buildSchemaDiff(oldDdl, newDdl);
+    const out = cleanupMigrationSql(userSql, {
+      oldTableNames: [...extractTableNames(oldDdl)],
+      schemaDiff: diff,
+    });
+    assert.match(out, /ALTER\s+TABLE\s+"Card"\s+ADD\s+CONSTRAINT\s+fk_card_account_id\s+FOREIGN\s+KEY/i);
+    assert.match(out, /ALTER\s+TABLE\s+"Limit"\s+ADD\s+CONSTRAINT\s+fk_limit_account_id\s+FOREIGN\s+KEY/i);
+    assert.match(out, /CREATE\s+INDEX\s+idx_card_account_id\s+ON\s+"Card"\s*\(\s*account_id\s*\)/i);
+    assert.match(out, /CREATE\s+INDEX\s+idx_limit_account_id\s+ON\s+"Limit"\s*\(\s*account_id\s*\)/i);
+    assert.doesNotMatch(out, /ALTER\s+TABLE\s+"Transaction"\s+ADD\s+CONSTRAINT/i);
+    // оба FK до индексов и до COMMIT
+    const cardFk = out.search(/fk_card_account_id/i);
+    const limitFk = out.search(/fk_limit_account_id/i);
+    const idxCard = out.search(/CREATE\s+INDEX\s+idx_card_account_id/i);
+    const commitIdx = out.search(/\bCOMMIT\s*;/i);
+    assert.ok(cardFk < idxCard && limitFk < idxCard && idxCard < commitIdx);
+  });
+});
+
 describe("ensureFks skips new tables and quoted REFERENCES", () => {
   it("does not inject ALTER FK when CREATE already has REFERENCES \"Parent\"", () => {
     const oldDdl = `CREATE TABLE "Account" (id INT PRIMARY KEY);`;

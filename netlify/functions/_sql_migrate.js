@@ -197,6 +197,14 @@ function extractTableNames(ddl) {
   return names;
 }
 
+function inferParentTableFromCol(col, knownTables) {
+  const m = String(col || "").toLowerCase().match(/^([a-z][a-z0-9_]*)_id$/);
+  if (!m) return null;
+  const base = m[1];
+  if (knownTables.has(base)) return base;
+  return null;
+}
+
 function buildSchemaDiff(oldDdl, newDdl) {
   const oldT = parseDdlTables(oldDdl);
   const newT = parseDdlTables(newDdl);
@@ -206,6 +214,7 @@ function buildSchemaDiff(oldDdl, newDdl) {
   const newNames = extractTableNames(newDdl);
   for (const t of Object.keys(oldT)) oldNames.add(t);
   for (const t of Object.keys(newT)) newNames.add(t);
+  const knownTables = new Set([...oldNames, ...newNames]);
   const addedCols = [];
   const addedTables = [];
   const droppedTables = [];
@@ -228,13 +237,32 @@ function buildSchemaDiff(oldDdl, newDdl) {
       if (!oldFkKeys.has(fk.col + ">" + fk.parent)) addedFks.push({ child: t, ...fk });
     });
   }
+  // NEW DDL часто пишет account_id INT без REFERENCES — выводим FK по имени колонки,
+  // если родительская таблица есть в схеме (account_id → account).
+  const fkSeen = new Set(addedFks.map(f => `${f.child}>${f.col}>${f.parent}`));
+  addedCols.forEach(a => {
+    const parent = inferParentTableFromCol(a.col, knownTables);
+    if (!parent || parent === a.table) return;
+    const key = `${a.table}>${a.col}>${parent}`;
+    if (fkSeen.has(key)) return;
+    const oldFkKeys = new Set(((oldT[a.table] || {}).fks || []).map(f => f.col + ">" + f.parent));
+    if (oldFkKeys.has(a.col + ">" + parent)) return;
+    fkSeen.add(key);
+    // ON DELETE как у других FK на того же родителя в NEW, иначе без действия
+    let onDelete = "NO ACTION";
+    for (const info of Object.values(newT)) {
+      const hit = (info.fks || []).find(f => f.parent === parent && f.onDelete && f.onDelete !== "NO ACTION");
+      if (hit) { onDelete = hit.onDelete; break; }
+    }
+    addedFks.push({ child: a.table, col: a.col, parent, parentCol: "id", onDelete, inferred: true });
+  });
   for (const t of oldNames) {
     if (!newNames.has(t)) droppedTables.push(t);
   }
   const lines = [];
   addedTables.forEach(t => lines.push(`CREATE TABLE ${t}`));
   addedCols.forEach(a => lines.push(`ALTER TABLE ${a.table} ADD COLUMN ${a.col} ${a.type}${a.notNull ? " NOT NULL" : ""}`));
-  addedFks.forEach(f => lines.push(`FK ${f.child}.${f.col} → ${f.parent}(${f.parentCol})`));
+  addedFks.forEach(f => lines.push(`FK ${f.child}.${f.col} → ${f.parent}(${f.parentCol})${f.inferred ? " (inferred)" : ""}`));
   droppedTables.forEach(t => lines.push(`DROP TABLE ${t}`));
   return { addedCols, addedTables, droppedTables, addedFks, text: lines.join("\n") || "(явных отличий парсер не нашёл — всё равно сверь DDL построчно)" };
 }
@@ -466,7 +494,42 @@ function cleanupMigrationSql(sql, opts) {
 
   // FK из diff для существующих таблиц (новые колонки с REFERENCES), если модель их забыла
   const diff = (opts && opts.schemaDiff) || {};
-  const addedFks = diff.addedFks || [];
+  const addedFks = [...(diff.addedFks || [])];
+  // Страховка: ALTER ADD COLUMN account_id при наличии таблицы account — даже если NEW DDL без REFERENCES
+  const knownTables = new Set([
+    ...[...(opts && opts.oldTableNames ? opts.oldTableNames : [])].map(normIdent),
+    ...preferredSpell.keys(),
+    ...createTables,
+  ]);
+  createFkKeys.forEach(k => {
+    const partsK = String(k).split(">");
+    if (partsK[2]) knownTables.add(partsK[2]);
+  });
+  seenAlterCol.forEach(key => {
+    const [t, col] = String(key).split(".");
+    const parent = inferParentTableFromCol(col, knownTables);
+    if (!parent || parent === t) return;
+    if (addedFks.some(f => normIdent(f.child) === t && normIdent(f.col) === col)) return;
+    let onDelete = "NO ACTION";
+    for (const f of addedFks) {
+      if (normIdent(f.parent) === parent && f.onDelete && f.onDelete !== "NO ACTION") {
+        onDelete = f.onDelete;
+        break;
+      }
+    }
+    // CASCADE с соседних CREATE FK на того же родителя
+    if (onDelete === "NO ACTION") {
+      const hit = [...createFkKeys].find(k => k.endsWith(">" + parent) && k.includes(">"));
+      if (hit) {
+        // onDelete возьмём из текста CREATE, если есть
+        const re = new RegExp(`REFERENCES\\s+["'\`]?${parent}["'\`]?[^;]*ON\\s+DELETE\\s+(CASCADE|RESTRICT|SET\\s+NULL)`, "i");
+        const m = text.match(re);
+        if (m) onDelete = m[1].replace(/\s+/g, " ").toUpperCase();
+      }
+    }
+    addedFks.push({ child: t, col, parent, parentCol: "id", onDelete, inferred: true });
+  });
+
   const fkInjects = [];
   addedFks.forEach(f => {
     const tNorm = normIdent(f.child);
@@ -536,11 +599,12 @@ function cleanupMigrationSql(sql, opts) {
   if (indexInjects.length) {
     let insertAt = out.findIndex(s => /\b(COMMIT|ROLLBACK)\b/i.test(String(s)));
     if (insertAt < 0) insertAt = out.length;
+    // строго ПОСЛЕ последнего FK, иначе индексы вклиниваются между двумя ADD CONSTRAINT
+    let afterFk = -1;
     for (let i = 0; i < insertAt; i++) {
-      if (/ADD\s+CONSTRAINT\s+\w+\s+FOREIGN\s+KEY/i.test(out[i]) || /^CREATE\s+INDEX\b/i.test(String(out[i]).trim())) {
-        insertAt = i + 1;
-      }
+      if (/ADD\s+CONSTRAINT\s+\w+\s+FOREIGN\s+KEY/i.test(out[i])) afterFk = i + 1;
     }
+    if (afterFk >= 0) insertAt = afterFk;
     out.splice(insertAt, 0, ...indexInjects);
   }
 
