@@ -356,17 +356,46 @@ CREATE TABLE "Card" (id INT, account_id INT);
 CREATE TABLE "Limit" (id INT, account_id INT, daily_limit DECIMAL(10,2));
 `),
     });
-    const step2 = out.search(/ШАГ\s*2/i);
+    for (let i = 0; i <= 6; i++) {
+      assert.match(out, new RegExp(`--\\s*ШАГ\\s*${i}:`, "i"), `step ${i} header`);
+    }
+    const step5 = out.search(/--\s*ШАГ\s*5:/i);
+    const step6 = out.search(/--\s*ШАГ\s*6:/i);
     const cardFk = out.search(/fk_card_account_id/i);
-    const step5 = out.search(/ШАГ\s*5/i);
-    const commitIdx = out.search(/\bCOMMIT\s*;/i);
-    assert.ok(cardFk > step2, "FK after step 2 marker");
-    assert.ok(step5 < 0 || cardFk > step5 || cardFk > step2, "FK near step 5");
-    assert.ok(cardFk < commitIdx && cardFk >= 0);
-    // после вырезания INSERT не должно быть FK сразу после ADD COLUMN без шага 5
-    const addColEnd = out.search(/ADD\s+COLUMN\s+daily_limit/i);
-    const between = out.slice(addColEnd, cardFk);
-    assert.doesNotMatch(between, /INSERT\s+INTO/i);
+    const idx = out.search(/CREATE\s+INDEX\s+idx_card_account_id/i);
+    assert.ok(step5 >= 0 && cardFk > step5, "FK after step 5 header");
+    assert.ok(idx > step5, "index after step 5 header");
+    assert.ok(step6 > cardFk && step6 > idx, "step 6 after constraints");
+  });
+
+  it("rebuilds steps 0-6 when model omitted step 5", () => {
+    const broken = `
+BEGIN;
+CREATE TABLE "Transaction" (
+  id SERIAL PRIMARY KEY,
+  account_id INT NOT NULL,
+  FOREIGN KEY (account_id) REFERENCES "Account"(id) ON DELETE CASCADE
+);
+ALTER TABLE "Card" ADD COLUMN account_id INT;
+-- ШАГ 2: Перенос
+-- пропущено: INSERT FROM "account" — нет колонок: account_id;
+ALTER TABLE "Card" ADD CONSTRAINT fk_card_account_id FOREIGN KEY (account_id) REFERENCES "Account"(id) ON DELETE CASCADE;
+CREATE INDEX idx_card_account_id ON "Card"(account_id);
+-- ШАГ 6: Удаление таблиц
+COMMIT;
+`;
+    const out = cleanupMigrationSql(broken, {
+      oldSchema: oldDdl,
+      oldTableNames: ["user", "account", "card", "limit"],
+    });
+    assert.match(out, /--\s*ШАГ\s*5:/i);
+    assert.match(out, /--\s*пропущено:.*account/i);
+    const step2 = out.search(/--\s*ШАГ\s*2:/i);
+    const skip = out.search(/пропущено:.*account/i);
+    const step5 = out.search(/--\s*ШАГ\s*5:/i);
+    const fk = out.search(/fk_card_account_id/i);
+    const step6 = out.search(/--\s*ШАГ\s*6:/i);
+    assert.ok(step2 < skip && skip < step5 && step5 < fk && fk < step6);
   });
 });
 

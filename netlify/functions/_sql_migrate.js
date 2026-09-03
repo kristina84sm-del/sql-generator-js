@@ -397,37 +397,128 @@ function validateInsertSelectAgainstSchema(stmt, oldTables, newTables) {
   return { ok: true, skipped: false };
 }
 
-/** Все ADD CONSTRAINT FK и CREATE INDEX — в ШАГ 5 (после backfill). */
+const MIGRATION_STEP_HEADERS = {
+  0: "-- ШАГ 0: Новые таблицы (CREATE целиком). Только таблицы, которых нет в OLD_SCHEMA.",
+  1: "-- ШАГ 1: Добавление новых колонок в СУЩЕСТВУЮЩИЕ таблицы (есть в OLD_SCHEMA)",
+  2: "-- ШАГ 2: Перенос/трансформация данных (RULES и кросс-табличный перенос)",
+  3: "-- ШАГ 3: Изменение типов существующих колонок (синтаксис TARGET_DIALECT)",
+  4: "-- ШАГ 4: Удаление старых колонок (только после переноса)",
+  5: "-- ШАГ 5: Constraints на существующих таблицах (PK, FK, UNIQUE, CHECK)",
+  6: "-- ШАГ 6: Удаление таблиц, которых нет в NEW_SCHEMA",
+};
+
+function stripStmtLeadComments(s) {
+  return String(s || "").replace(/^(?:\s*--[^\n]*\n)+/, "").trim();
+}
+
+function classifyMigrationStmt(code) {
+  const c = String(code || "").trim();
+  if (!c) return "empty";
+  if (/^BEGIN\b/i.test(c) || /^START\s+TRANSACTION\b/i.test(c)) return "begin";
+  if (/^(COMMIT|ROLLBACK)\b/i.test(c)) return "end";
+  if (/^CREATE\s+TABLE\b/i.test(c)) return 0;
+  if (/^ALTER\s+TABLE\s+\S+\s+ADD\s+COLUMN\b/i.test(c)) return 1;
+  if (/^(INSERT|UPDATE|DELETE)\b/i.test(c)) return 2;
+  if (/^--\s*пропущено:/i.test(c)) return 2;
+  if (/^ALTER\s+TABLE\s+\S+\s+ALTER\s+COLUMN\b/i.test(c) || /^ALTER\s+TABLE\s+\S+\s+MODIFY\b/i.test(c)) return 3;
+  if (/^ALTER\s+TABLE\s+\S+\s+DROP\s+COLUMN\b/i.test(c)) return 4;
+  if (/^ALTER\s+TABLE\s+\S+\s+ADD\s+CONSTRAINT\b/i.test(c)) return 5;
+  if (/^CREATE\s+(?:UNIQUE\s+)?INDEX\b/i.test(c)) return 5;
+  if (/^DROP\s+TABLE\b/i.test(c)) return 6;
+  return "comment";
+}
+
+/**
+ * Пересобирает миграцию по шагам 0–6.
+ * FK/INDEX всегда в шаге 5 (после data), заголовки шагов всегда присутствуют.
+ * Старый «просто вставить перед COMMIT» ломался, когда шага 5 не было.
+ */
 function relocateFksAndIndexesToStep5(statements) {
-  const fks = [];
-  const idxs = [];
-  const rest = [];
-  const seenFk = new Set();
-  const seenIdx = new Set();
-  statements.forEach(s => {
-    const code = String(s || "").replace(/^(?:\s*--[^\n]*\n)+/, "").trim();
-    if (/^ALTER\s+TABLE\s+\S+\s+ADD\s+CONSTRAINT\s+\w+\s+FOREIGN\s+KEY/i.test(code)) {
-      const key = code.replace(/\s+/g, " ").toLowerCase();
-      if (!seenFk.has(key)) { seenFk.add(key); fks.push(code); }
+  const buckets = { 0: [], 1: [], 2: [], 3: [], 4: [], 5: [], 6: [] };
+  const begin = [];
+  const end = [];
+  let softStep = 2;
+
+  statements.forEach(raw => {
+    const s = String(raw || "").trim();
+    if (!s) return;
+
+    // Не терять «-- пропущено», даже если оно в одном куске с ALTER/INDEX
+    String(s).split("\n").forEach(line => {
+      const t = line.trim();
+      if (/^--\s*пропущено:/i.test(t)) buckets[2].push(t.replace(/;+\s*$/, ""));
+    });
+
+    // Кусок вида «-- ШАГ 6...\nCOMMIT»
+    if (/\b(COMMIT|ROLLBACK)\b/i.test(s)) {
+      const codeOnly = stripStmtLeadComments(s);
+      if (/^(COMMIT|ROLLBACK)\b/i.test(codeOnly) || !/\b(CREATE|ALTER|INSERT|UPDATE|DELETE|DROP)\b/i.test(codeOnly)) {
+        const endTok = ((s.match(/\b(COMMIT|ROLLBACK)\b/i) || [])[1] || "COMMIT").toUpperCase();
+        end.push(endTok);
+        return;
+      }
+    }
+
+    const code = stripStmtLeadComments(s);
+    const kind = classifyMigrationStmt(code);
+
+    if (kind === "begin") {
+      begin.push("BEGIN");
       return;
     }
-    if (/^CREATE\s+(?:UNIQUE\s+)?INDEX\b/i.test(code)) {
-      const key = code.replace(/\s+/g, " ").toLowerCase();
-      if (!seenIdx.has(key)) { seenIdx.add(key); idxs.push(code); }
+    if (kind === "end") {
+      end.push(code.match(/^(COMMIT|ROLLBACK)/i)[1].toUpperCase());
       return;
     }
-    rest.push(s);
+    if (kind === "empty") {
+      const stepM = s.match(/--\s*ШАГ\s*(\d+)/i);
+      if (stepM) softStep = Math.min(6, Number(stepM[1]));
+      return;
+    }
+
+    if (kind === "comment") {
+      if (/--\s*ШАГ\s*(\d+)/i.test(s) && !/\b(CREATE|ALTER|INSERT|UPDATE|DROP)\b/i.test(s)) {
+        const m = s.match(/--\s*ШАГ\s*(\d+)/i);
+        if (m) softStep = Math.min(6, Number(m[1]));
+        return;
+      }
+      // «пропущено» уже собрали выше
+      if (/^--\s*пропущено:/i.test(s.trim())) return;
+      if (!/--\s*ШАГ\s*\d+/i.test(s) && !/^--\s*пропущено:/i.test(s)) {
+        buckets[softStep].push(s.replace(/;+\s*$/, ""));
+      }
+      return;
+    }
+
+    buckets[kind].push(code);
+    softStep = kind;
   });
-  if (!fks.length && !idxs.length) return statements;
-  // Перед COMMIT/ROLLBACK; если есть отдельный комментарий ШАГ 5 — сразу после него
-  let insertAt = rest.findIndex(s => /\b(COMMIT|ROLLBACK)\b/i.test(String(s)));
-  if (insertAt < 0) insertAt = rest.length;
-  const step5Only = rest.findIndex((s, i) =>
-    i < insertAt && /--\s*ШАГ\s*5:/i.test(String(s)) && !/\b(COMMIT|ROLLBACK)\b/i.test(String(s))
-  );
-  if (step5Only >= 0) insertAt = step5Only + 1;
-  rest.splice(insertAt, 0, ...fks, ...idxs);
-  return rest;
+
+  // дедуп пропущено в шаге 2
+  const seen2 = new Set();
+  buckets[2] = buckets[2].filter(stmt => {
+    const key = stmt.replace(/\s+/g, " ").toLowerCase();
+    if (seen2.has(key)) return false;
+    seen2.add(key);
+    return true;
+  });
+
+  const seen5 = new Set();
+  buckets[5] = buckets[5].filter(stmt => {
+    const key = stmt.replace(/\s+/g, " ").toLowerCase();
+    if (seen5.has(key)) return false;
+    seen5.add(key);
+    return true;
+  });
+
+  const out = [];
+  out.push(begin[0] || "BEGIN");
+  for (let step = 0; step <= 6; step++) {
+    out.push(MIGRATION_STEP_HEADERS[step]);
+    buckets[step].forEach(stmt => out.push(stmt));
+  }
+  out.push(end[0] || "COMMIT");
+  return out;
 }
 
 /**
@@ -524,10 +615,16 @@ function cleanupMigrationSql(sql, opts) {
     p = p.replace(/\s*--\s*новое поле[^\n]*/gi, "");
     p = p.replace(/\s*--\s*FK\s*$/gim, "");
 
+    // «пропущено» часто сидит в комментариях перед ALTER ('; в комментарии не режет statement)
+    String(p).split("\n").forEach(line => {
+      const t = line.trim().replace(/;+\s*$/, "");
+      if (/^--\s*пропущено:/i.test(t)) out.push(t);
+    });
+
     // комментарии перед statement (ШАГ N:) — иначе ^ALTER не матчится
     const leadComments = (p.match(/^((?:\s*--[^\n]*\n)+)/) || [])[1] || "";
     const stmt = p.slice(leadComments.length).trim();
-    const keepLead = leadComments.trim() ? leadComments.trim() + "\n" : "";
+    const keepLead = ""; // заголовки шагов пересоберёт relocate; keepLead с FK ломал шаг 5
 
     // INSERT…SELECT с колонками, которых нет у источника в OLD_SCHEMA — выкинуть
     if (/^INSERT\s+INTO\b/i.test(stmt)) {
@@ -711,14 +808,18 @@ function cleanupMigrationSql(sql, opts) {
     out.splice(insertAt, 0, ...indexInjects);
   }
 
-  // FK и INDEX всегда в ШАГ 5 (после data/backfill), даже если модель вставила их в ШАГ 2
+  // FK/INDEX → шаг 5; заголовки шагов 0–6 всегда
   const ordered = relocateFksAndIndexesToStep5(out);
 
-  // Собрать обратно, сохранив BEGIN/COMMIT структуру по возможности
-  let body = ordered.map(s => /;\s*$/.test(s) ? s : s + ";").join("\n\n");
-  if (!/^\s*BEGIN/i.test(body) && /^\s*BEGIN/i.test(text)) body = "BEGIN;\n\n" + body;
-  if (!/\bCOMMIT\s*;|\bROLLBACK\s*;/i.test(body) && /\bCOMMIT\s*;/i.test(text)) body += "\n\nCOMMIT;";
-  if (!/\bCOMMIT\s*;|\bROLLBACK\s*;/i.test(body) && /\bROLLBACK\s*;/i.test(text)) body += "\n\nROLLBACK;";
+  const withSemi = (s) => {
+    const t = String(s || "").trim();
+    if (!t) return t;
+    if (/^--/.test(t)) return t; // заголовки шагов / «пропущено»
+    return /;\s*$/.test(t) ? t : t + ";";
+  };
+
+  let body = ordered.map(withSemi).join("\n\n");
+  // BEGIN/COMMIT уже в ordered
   return body.trim() + "\n";
 }
 
