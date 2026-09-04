@@ -70,7 +70,9 @@ exports.handler = async (event) => {
           COALESCE(week.cnt, 0)   AS requests_week,
           COALESCE(total.cnt, 0)  AS requests_total,
           COALESCE(tokens.sum_tokens, 0) AS tokens_total,
-          COALESCE(tok24.sum_tokens, 0) AS tokens_24h
+          COALESCE(rl24.sum_tokens, 0) AS tokens_24h_log,
+          COALESCE(rl24.with_tok, 0) AS tokens_24h_log_n,
+          COALESCE(qh24.sum_tokens, 0) AS tokens_24h_hist
         FROM users u
         LEFT JOIN (
           SELECT user_id, COUNT(*) AS cnt FROM query_history
@@ -91,18 +93,33 @@ exports.handler = async (event) => {
           GROUP BY user_id
         ) tokens ON tokens.user_id = u.id
         LEFT JOIN (
-          SELECT user_id, SUM(tokens_used) AS sum_tokens FROM request_log
+          SELECT user_id,
+                 COALESCE(SUM(tokens_used), 0) AS sum_tokens,
+                 COUNT(*) FILTER (WHERE tokens_used IS NOT NULL AND tokens_used > 0) AS with_tok
+          FROM request_log
           WHERE created_at > NOW() - INTERVAL '24 hours'
           GROUP BY user_id
-        ) tok24 ON tok24.user_id = u.id
+        ) rl24 ON rl24.user_id = u.id
+        LEFT JOIN (
+          SELECT user_id, COALESCE(SUM(tokens_used), 0) AS sum_tokens
+          FROM query_history
+          WHERE created_at > NOW() - INTERVAL '24 hours'
+          GROUP BY user_id
+        ) qh24 ON qh24.user_id = u.id
         ORDER BY requests_today DESC, requests_week DESC
       `);
  
       const { resolveDailyTokenLimit } = require("./_rate_limit_check");
-      const users = rows.map(u => ({
-        ...u,
-        daily_token_limit_effective: resolveDailyTokenLimit(u.daily_token_limit),
-      }));
+      const users = rows.map(u => {
+        const fromLog = Number(u.tokens_24h_log_n || 0) > 0
+          ? Number(u.tokens_24h_log || 0)
+          : Number(u.tokens_24h_hist || 0);
+        return {
+          ...u,
+          tokens_24h: fromLog,
+          daily_token_limit_effective: resolveDailyTokenLimit(u.daily_token_limit),
+        };
+      });
 
       // Сводка по всему приложению за сегодня — для общей карточки
       const { rows: summaryRows } = await pool.query(`

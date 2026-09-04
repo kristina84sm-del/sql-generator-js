@@ -29,6 +29,37 @@ function resolveDailyTokenLimit(userLimit) {
 }
 
 /**
+ * Токены за 24ч: если в request_log уже есть записи с tokens_used > 0 — берём их
+ * (серверный учёт после деплоя лимита). Иначе — query_history (как раньше считали в UI).
+ * Так не показываем 0 при реальном расходе из истории.
+ */
+async function getTokensUsed24h(userId, db) {
+  const q = db && typeof db.query === "function" ? db : pool;
+  try {
+    const { rows: rl } = await q.query(
+      `SELECT COALESCE(SUM(tokens_used), 0)::bigint AS sum_tokens,
+              COUNT(*) FILTER (WHERE tokens_used IS NOT NULL AND tokens_used > 0)::int AS with_tok
+       FROM request_log
+       WHERE user_id = $1 AND created_at > NOW() - INTERVAL '24 hours'`,
+      [userId]
+    );
+    if (parseInt(rl[0]?.with_tok || 0, 10) > 0) {
+      return parseInt(rl[0].sum_tokens || 0, 10);
+    }
+  } catch (e) {
+    if (!e || e.code !== "42703") throw e;
+  }
+
+  const { rows: qh } = await q.query(
+    `SELECT COALESCE(SUM(tokens_used), 0)::bigint AS sum_tokens
+     FROM query_history
+     WHERE user_id = $1 AND created_at > NOW() - INTERVAL '24 hours'`,
+    [userId]
+  );
+  return parseInt(qh[0]?.sum_tokens || 0, 10);
+}
+
+/**
  * @param {string} userId - ID пользователя из JWT (auth.user.sub)
  * @returns {Promise<{ok: boolean, error?: string, remaining?: number, tokens_used_24h?: number, token_limit?: number}>}
  */
@@ -78,19 +109,7 @@ async function checkRateLimit(userId) {
     // Дневной лимит токенов (по умолчанию 100k для всех)
     const tokenLimit = resolveDailyTokenLimit(row.daily_token_limit);
     if (tokenLimit > 0) {
-      let usedTokens = 0;
-      try {
-        const { rows: tokRows } = await pool.query(
-          `SELECT COALESCE(SUM(tokens_used), 0)::bigint AS sum_tokens
-           FROM request_log
-           WHERE user_id = $1 AND created_at > NOW() - INTERVAL '24 hours'`,
-          [userId]
-        );
-        usedTokens = parseInt(tokRows[0]?.sum_tokens || 0, 10);
-      } catch (e) {
-        // колонки ещё нет — не блокируем
-        if (e && e.code !== "42703") throw e;
-      }
+      const usedTokens = await getTokensUsed24h(userId);
 
       if (usedTokens >= tokenLimit) {
         return {
@@ -122,4 +141,5 @@ module.exports = {
   checkRateLimit,
   defaultDailyTokenLimit,
   resolveDailyTokenLimit,
+  getTokensUsed24h,
 };

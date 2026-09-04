@@ -239,11 +239,7 @@ if (!token || token === "undefined") return { statusCode: 401, body: { error: "�
       `SELECT u.id, u.username, u.email, u.created_at, u.is_admin,
               u.daily_request_limit, u.daily_token_limit,
               COUNT(DISTINCT r.id)::int AS request_count,
-              COALESCE(SUM(q.tokens_used), 0)::int AS tokens_total,
-              COALESCE((
-                SELECT SUM(rl.tokens_used)::int FROM request_log rl
-                WHERE rl.user_id = u.id AND rl.created_at > NOW() - INTERVAL '24 hours'
-              ), 0) AS tokens_used_24h
+              COALESCE(SUM(q.tokens_used), 0)::int AS tokens_total
        FROM users u
        LEFT JOIN request_log r ON r.user_id = u.id
        LEFT JOIN query_history q ON q.user_id = u.id
@@ -253,8 +249,9 @@ if (!token || token === "undefined") return { statusCode: 401, body: { error: "�
     );
     if (res.rows.length === 0) return { statusCode: 404, body: { error: "Пользователь не найден" } };
     const user = res.rows[0];
-    const { resolveDailyTokenLimit } = require("./_rate_limit_check");
+    const { resolveDailyTokenLimit, getTokensUsed24h } = require("./_rate_limit_check");
     const tokenLimit = resolveDailyTokenLimit(user.daily_token_limit);
+    user.tokens_used_24h = await getTokensUsed24h(user.id, client);
     user.daily_token_limit_effective = tokenLimit;
     user.tokens_remaining_24h = tokenLimit > 0
       ? Math.max(0, tokenLimit - (user.tokens_used_24h || 0))
