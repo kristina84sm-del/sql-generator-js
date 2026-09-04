@@ -56,6 +56,8 @@ exports.handler = async (event) => {
   try {
     // ─── СТАТИСТИКА ПО ВСЕМ ПОЛЬЗОВАТЕЛЯМ ───
     if (action === "stats" && event.httpMethod === "GET") {
+      await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS daily_token_limit INTEGER");
+      await pool.query("ALTER TABLE request_log ADD COLUMN IF NOT EXISTS tokens_used INTEGER");
       const { rows } = await pool.query(`
         SELECT
           u.id,
@@ -63,10 +65,12 @@ exports.handler = async (event) => {
           u.email,
           u.is_admin,
           u.daily_request_limit,
+          u.daily_token_limit,
           COALESCE(today.cnt, 0)  AS requests_today,
           COALESCE(week.cnt, 0)   AS requests_week,
           COALESCE(total.cnt, 0)  AS requests_total,
-          COALESCE(tokens.sum_tokens, 0) AS tokens_total
+          COALESCE(tokens.sum_tokens, 0) AS tokens_total,
+          COALESCE(tok24.sum_tokens, 0) AS tokens_24h
         FROM users u
         LEFT JOIN (
           SELECT user_id, COUNT(*) AS cnt FROM query_history
@@ -86,9 +90,20 @@ exports.handler = async (event) => {
           SELECT user_id, SUM(tokens_used) AS sum_tokens FROM query_history
           GROUP BY user_id
         ) tokens ON tokens.user_id = u.id
+        LEFT JOIN (
+          SELECT user_id, SUM(tokens_used) AS sum_tokens FROM request_log
+          WHERE created_at > NOW() - INTERVAL '24 hours'
+          GROUP BY user_id
+        ) tok24 ON tok24.user_id = u.id
         ORDER BY requests_today DESC, requests_week DESC
       `);
  
+      const { resolveDailyTokenLimit } = require("./_rate_limit_check");
+      const users = rows.map(u => ({
+        ...u,
+        daily_token_limit_effective: resolveDailyTokenLimit(u.daily_token_limit),
+      }));
+
       // Сводка по всему приложению за сегодня — для общей карточки
       const { rows: summaryRows } = await pool.query(`
         SELECT COUNT(*) AS total_today
@@ -99,19 +114,20 @@ exports.handler = async (event) => {
       return {
         statusCode: 200, headers: CORS,
         body: JSON.stringify({
-          users: rows,
+          users,
           total_requests_today: parseInt(summaryRows[0]?.total_today || 0, 10),
+          default_daily_token_limit: resolveDailyTokenLimit(null),
         }),
       };
     }
  
-    // ─── УСТАНОВИТЬ ЛИМИТ ОДНОМУ ИЛИ ВСЕМ ПОЛЬЗОВАТЕЛЯМ ───
+    // ─── УСТАНОВИТЬ ЛИМИТ ЗАПРОСОВ (как раньше) ───
     if (action === "set_limit" && event.httpMethod === "POST") {
       const body = JSON.parse(event.body || "{}");
-      const targetUserId = body.user_id;          // конкретный пользователь
-      const applyToAll = body.apply_to_all === true; // или массово всем
-      let limit = body.limit;                      // число или null (=безлимит)
- 
+      const targetUserId = body.user_id;
+      const applyToAll = body.apply_to_all === true;
+      let limit = body.limit;
+
       if (limit !== null && limit !== undefined) {
         limit = parseInt(limit, 10);
         if (isNaN(limit) || limit < 0) {
@@ -120,19 +136,49 @@ exports.handler = async (event) => {
       } else {
         limit = null;
       }
- 
+
       if (applyToAll) {
         await pool.query("UPDATE users SET daily_request_limit = $1", [limit]);
         return { statusCode: 200, headers: CORS, body: JSON.stringify({ ok: true, applied: "all" }) };
       }
- 
+
       if (!targetUserId) {
         return { statusCode: 400, headers: CORS, body: JSON.stringify({ error: "Не передан user_id." }) };
       }
       await pool.query("UPDATE users SET daily_request_limit = $1 WHERE id = $2", [limit, targetUserId]);
       return { statusCode: 200, headers: CORS, body: JSON.stringify({ ok: true, applied: targetUserId }) };
     }
- 
+
+    // ─── ЛИМИТ ТОКЕНОВ / 24ч (NULL = дефолт 100k, 0 = безлимит) ───
+    if (action === "set_token_limit" && event.httpMethod === "POST") {
+      const body = JSON.parse(event.body || "{}");
+      const targetUserId = body.user_id;
+      const applyToAll = body.apply_to_all === true;
+      let limit = body.limit;
+
+      if (limit !== null && limit !== undefined && limit !== "") {
+        limit = parseInt(limit, 10);
+        if (isNaN(limit) || limit < 0) {
+          return { statusCode: 400, headers: CORS, body: JSON.stringify({ error: "Некорректный лимит токенов." }) };
+        }
+      } else {
+        limit = null;
+      }
+
+      // убедиться что колонка есть
+      await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS daily_token_limit INTEGER");
+
+      if (applyToAll) {
+        await pool.query("UPDATE users SET daily_token_limit = $1", [limit]);
+        return { statusCode: 200, headers: CORS, body: JSON.stringify({ ok: true, applied: "all" }) };
+      }
+      if (!targetUserId) {
+        return { statusCode: 400, headers: CORS, body: JSON.stringify({ error: "Не передан user_id." }) };
+      }
+      await pool.query("UPDATE users SET daily_token_limit = $1 WHERE id = $2", [limit, targetUserId]);
+      return { statusCode: 200, headers: CORS, body: JSON.stringify({ ok: true, applied: targetUserId }) };
+    }
+
     // ─── НАЗНАЧИТЬ / СНЯТЬ ПРАВА АДМИНИСТРАТОРА ───
     if (action === "set_admin" && event.httpMethod === "POST") {
       const body = JSON.parse(event.body || "{}");
@@ -141,9 +187,7 @@ exports.handler = async (event) => {
       if (!targetUserId) {
         return { statusCode: 400, headers: CORS, body: JSON.stringify({ error: "Не передан user_id." }) };
       }
-      // Защита от случайного самопонижения последнего админа —
-      // не даём убрать права у самого себя, если это единственный админ
-      if (targetUserId === auth.user.sub && !makeAdmin) {
+      if (String(targetUserId) === String(auth.user.sub) && !makeAdmin) {
         const { rows: adminCount } = await pool.query("SELECT COUNT(*) AS cnt FROM users WHERE is_admin = TRUE");
         if (parseInt(adminCount[0].cnt, 10) <= 1) {
           return { statusCode: 400, headers: CORS, body: JSON.stringify({ error: "Нельзя снять права с последнего администратора." }) };
@@ -152,7 +196,7 @@ exports.handler = async (event) => {
       await pool.query("UPDATE users SET is_admin = $1 WHERE id = $2", [makeAdmin, targetUserId]);
       return { statusCode: 200, headers: CORS, body: JSON.stringify({ ok: true }) };
     }
- 
+
     return { statusCode: 400, headers: CORS, body: JSON.stringify({ error: "Неизвестное действие." }) };
   } catch (e) {
     console.error("admin_panel error:", e);

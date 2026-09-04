@@ -109,6 +109,7 @@ exports.handler = async (event) => {
   // Принимаем schema_input (DDL/текст/DB-diagram/Mermaid) или устаревший mermaid_er
   // OCR режим: если передан image_base64 — просим модель извлечь DDL из картинки
   let rawSchema;
+  let ocrTokens = null;
   if (body.image_base64) {
     // Раньше этот блок не был защищён try/catch — любой сбой (сеть,
     // невалидный JSON от OpenAI, превышение лимитов) давал голый 500.
@@ -134,6 +135,7 @@ exports.handler = async (event) => {
       }
       const vd = await visionResp.json();
       rawSchema = truncate((vd.choices?.[0]?.message?.content || "").trim(), LIMITS.mermaid_er);
+      ocrTokens = vd.usage?.total_tokens || null;
     } catch (e) {
       console.error("analyze_architecture OCR error:", e);
       return { statusCode: 502, headers: CORS, body: JSON.stringify({ error: "Ошибка распознавания изображения: " + e.message }) };
@@ -141,7 +143,7 @@ exports.handler = async (event) => {
     if (!rawSchema) return { statusCode: 422, headers: CORS, body: JSON.stringify({ error: "Не удалось распознать схему на изображении" }) };
     if (body.ocr_only) {
       // Только распознавание, без полного аудита — экономим токены
-      await logRequest(auth.user.sub, "ocr_extract");
+      await logRequest(auth.user.sub, "ocr_extract", ocrTokens);
       return { statusCode: 200, headers: CORS, body: JSON.stringify({ audit: "```sql\n" + rawSchema + "\n```" }) };
     }
   } else {
@@ -174,8 +176,10 @@ ${sqlText || "(не передан)"}`;
     if (!audit)
       return { statusCode: 502, headers: CORS, body: JSON.stringify({ error: "В ответе нет поля audit." }) };
 
-    await logRequest(auth.user.sub, "analyze_architecture");
-    return { statusCode: 200, headers: CORS, body: JSON.stringify({ audit }) };
+    const auditTok = parsed.__usage?.total_tokens || 0;
+    const tokensUsed = (auditTok + (ocrTokens || 0)) || null;
+    await logRequest(auth.user.sub, "analyze_architecture", tokensUsed);
+    return { statusCode: 200, headers: CORS, body: JSON.stringify({ audit, tokens_used: tokensUsed }) };
   } catch (e) {
     console.error("analyze error:", e);
     return { statusCode: 502, headers: CORS, body: JSON.stringify({ error: `Ошибка аудита: ${e.message}` }) };

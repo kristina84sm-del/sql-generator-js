@@ -171,7 +171,7 @@ SCENARIO: ${scenario || "(не указан — набор только по CON
     if (!tests)
       return { statusCode: 502, headers: CORS, body: JSON.stringify({ error: "В ответе нет поля tests." }) };
  
-    await logRequest(auth.user.sub, "generate_sql_tests");
+    await logRequest(auth.user.sub, "generate_sql_tests", tokensUsed);
     return { statusCode: 200, headers: CORS, body: JSON.stringify({ tests, summary, warnings, tokens_used: tokensUsed }) };
   } catch (e) {
     console.error("sql_tests error:", e);

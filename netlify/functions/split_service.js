@@ -181,15 +181,14 @@ ${schema}`;
   try {
     const systemPrompt = hasTarget ? SPLIT_TARGET_PROMPT : SPLIT_RECOMMEND_PROMPT;
     const parsed = await callOpenAI({ apiKey, model, temperature: 0.2, systemPrompt, userPrompt: userMessage });
- 
-    await logRequest(auth.user.sub, "split_service");
- 
+    const tokensUsed = parsed.__usage?.total_tokens || null;
+    await logRequest(auth.user.sub, "split_service", tokensUsed);
+
     if (hasTarget) {
       const new_ddl       = String(parsed.new_ddl || "").trim();
       const new_mermaid   = String(parsed.new_mermaid || "").trim();
       const migration_sql = String(parsed.migration_sql || "").trim();
       const explanation    = String(parsed.explanation || "").trim();
-      const tokensUsed = parsed.__usage?.total_tokens || null;
       if (!new_ddl && !new_mermaid)
         return { statusCode: 502, headers: CORS, body: JSON.stringify({ error: "Модель не вернула схему сервиса." }) };
       return { statusCode: 200, headers: CORS, body: JSON.stringify({ mode: "target", new_ddl, new_mermaid, migration_sql, explanation, tokens_used: tokensUsed }) };
@@ -197,10 +196,9 @@ ${schema}`;
       const report = String(parsed.report || "").trim();
       const monolith_mermaid = String(parsed.monolith_mermaid || "").trim();
       const services_diagram = String(parsed.services_diagram || "").trim();
-      const tokensUsedRec = parsed.__usage?.total_tokens || null;
       if (!report)
         return { statusCode: 502, headers: CORS, body: JSON.stringify({ error: "Модель не вернула рекомендации." }) };
-      return { statusCode: 200, headers: CORS, body: JSON.stringify({ mode: "recommend", report, monolith_mermaid, services_diagram, tokens_used: tokensUsedRec }) }; 
+      return { statusCode: 200, headers: CORS, body: JSON.stringify({ mode: "recommend", report, monolith_mermaid, services_diagram, tokens_used: tokensUsed }) };
     }
   } catch (e) {
     console.error("split_service error:", e);

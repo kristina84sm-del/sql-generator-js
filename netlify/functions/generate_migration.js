@@ -407,7 +407,7 @@ ${rules || "(не заданы)"}`;
       );
     }
  
-    await logRequest(auth.user.sub, "generate_migration");
+    await logRequest(auth.user.sub, "generate_migration", tokensUsed);
     return { statusCode: 200, headers: CORS, body: JSON.stringify({ migration_sql, summary, mapping_table, verification_report, warnings, tokens_used: tokensUsed }) };
   } catch (e) {
     trackError("generate_migration", e);

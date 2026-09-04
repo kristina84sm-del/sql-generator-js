@@ -76,16 +76,30 @@ async function checkAuth(event) {
   return { ok: true, user: payload };
 }
  
-async function logRequest(userId, endpoint) {
+async function logRequest(userId, endpoint, tokensUsed) {
   if (!process.env.DATABASE_URL) return;
   let client;
   try {
     client = await getClient();
+    const tokens = tokensUsed == null || tokensUsed === "" ? null : parseInt(tokensUsed, 10);
+    const tok = Number.isFinite(tokens) && tokens >= 0 ? tokens : null;
     await client.query(
-      "INSERT INTO request_log (user_id, endpoint) VALUES ($1, $2)",
-      [userId, endpoint]
+      `INSERT INTO request_log (user_id, endpoint, tokens_used) VALUES ($1, $2, $3)`,
+      [userId, endpoint, tok]
     );
   } catch (e) {
+    // Старые БД без колонки tokens_used — fallback без токенов
+    if (e && e.code === "42703") {
+      try {
+        await client.query(
+          "INSERT INTO request_log (user_id, endpoint) VALUES ($1, $2)",
+          [userId, endpoint]
+        );
+        return;
+      } catch (e2) {
+        trackError("logRequest_fallback", e2);
+      }
+    }
     trackError("logRequest", e);
   } finally {
     if (client) await client.end().catch(() => {});

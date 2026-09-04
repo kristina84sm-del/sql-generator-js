@@ -407,7 +407,7 @@ ${inputSqlBlock || ""}
       erDiagram = "erDiagram\n" + erDiagram;
     }
     erDiagram = ensureMermaidRelations(erDiagram, ddlScript || userPromptTrunc);
-    await logRequest(auth.user.sub, "generate");
+    await logRequest(auth.user.sub, "generate", tokensUsed);
 
     return { statusCode: 200, headers: responseHeaders, body: JSON.stringify({ er_diagram: erDiagram, sql: sqlText, ddl_script: ddlScript, explanation, tokens_used: tokensUsed }) };
   } catch (e) {

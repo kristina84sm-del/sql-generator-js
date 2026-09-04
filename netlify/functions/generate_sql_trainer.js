@@ -702,7 +702,8 @@ ${userSql}`;
         systemPrompt: CHECK_SYSTEM_PROMPT, userPrompt: userMessage, maxTokens: 1500,
       });
       const verdict = ["ok", "partial", "wrong"].includes(parsed.verdict) ? parsed.verdict : "partial";
-      await logRequest(auth.user.sub, "generate_sql_trainer");
+      const checkTokens = parsed.__usage?.total_tokens || null;
+      await logRequest(auth.user.sub, "generate_sql_trainer", checkTokens);
       return {
         statusCode: 200,
         headers: CORS,
@@ -710,7 +711,7 @@ ${userSql}`;
           verdict,
           feedback: String(parsed.feedback || "").trim(),
           corrected_sql: String(parsed.corrected_sql || "").trim(),
-          tokens_used: parsed.__usage?.total_tokens || null,
+          tokens_used: checkTokens,
         }),
       };
     }
@@ -827,7 +828,7 @@ AVOID_TITLES: ${avoidTitles.join(" | ") || "(нет)"}`;
       });
     }
 
-    await logRequest(auth.user.sub, "generate_sql_trainer");
+    await logRequest(auth.user.sub, "generate_sql_trainer", tokens || null);
     return {
       statusCode: 200,
       headers: CORS,

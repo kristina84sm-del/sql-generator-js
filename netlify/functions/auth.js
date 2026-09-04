@@ -101,8 +101,10 @@ async function ensureSchema(client) {
     ALTER TABLE users ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
     ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN NOT NULL DEFAULT FALSE;
     ALTER TABLE users ADD COLUMN IF NOT EXISTS daily_request_limit INTEGER;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS daily_token_limit INTEGER;
     ALTER TABLE query_history ALTER COLUMN dialect TYPE VARCHAR(64);
     ALTER TABLE query_history ADD COLUMN IF NOT EXISTS tokens_used INTEGER;
+    ALTER TABLE request_log ADD COLUMN IF NOT EXISTS tokens_used INTEGER;
     ALTER TABLE auth_sessions ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
     ALTER TABLE auth_sessions ADD COLUMN IF NOT EXISTS revoked_at TIMESTAMPTZ;
     ALTER TABLE auth_sessions ADD COLUMN IF NOT EXISTS user_agent TEXT;
@@ -235,8 +237,13 @@ if (!token || token === "undefined") return { statusCode: 401, body: { error: "�
     await ensureSchema(client);
     const res = await client.query(
       `SELECT u.id, u.username, u.email, u.created_at, u.is_admin,
+              u.daily_request_limit, u.daily_token_limit,
               COUNT(DISTINCT r.id)::int AS request_count,
-              COALESCE(SUM(q.tokens_used), 0)::int AS tokens_total
+              COALESCE(SUM(q.tokens_used), 0)::int AS tokens_total,
+              COALESCE((
+                SELECT SUM(rl.tokens_used)::int FROM request_log rl
+                WHERE rl.user_id = u.id AND rl.created_at > NOW() - INTERVAL '24 hours'
+              ), 0) AS tokens_used_24h
        FROM users u
        LEFT JOIN request_log r ON r.user_id = u.id
        LEFT JOIN query_history q ON q.user_id = u.id
@@ -245,7 +252,14 @@ if (!token || token === "undefined") return { statusCode: 401, body: { error: "�
       [payload.sub]
     );
     if (res.rows.length === 0) return { statusCode: 404, body: { error: "Пользователь не найден" } };
-    return { statusCode: 200, body: { user: res.rows[0] } };
+    const user = res.rows[0];
+    const { resolveDailyTokenLimit } = require("./_rate_limit_check");
+    const tokenLimit = resolveDailyTokenLimit(user.daily_token_limit);
+    user.daily_token_limit_effective = tokenLimit;
+    user.tokens_remaining_24h = tokenLimit > 0
+      ? Math.max(0, tokenLimit - (user.tokens_used_24h || 0))
+      : null;
+    return { statusCode: 200, body: { user } };
   } finally {
     await client.end();
   }

@@ -203,7 +203,7 @@ ${mermaidEr}`;
       notes = notes.slice(0, 400).replace(/\s+\S*$/, "") + (notes.length > 400 ? "…" : "");
     }
  
-    await logRequest(auth.user.sub, "generate_mock_data");
+    await logRequest(auth.user.sub, "generate_mock_data", tokensUsed);
     return { statusCode: 200, headers: CORS, body: JSON.stringify({ inserts, notes, tokens_used: tokensUsed }) };
   } catch (e) {
     console.error("mock_data error:", e);

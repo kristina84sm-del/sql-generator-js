@@ -1,4 +1,4 @@
-// Общий хелпер лимита запросов (дневной на пользователя + почасовой потолок).
+// Лимиты: почасовой по числу запросов + дневной по токенам OpenAI (дефолт 100k).
 // Используется во всех функциях, которые тратят токены OpenAI.
 
 const { Pool } = require("pg");
@@ -10,15 +10,31 @@ pool.on("error", (err) => {
   trackError("rate_limit_pool", err);
 });
 
+/** Глобальный дефолт: 100_000 токенов / 24ч. Env DAILY_TOKEN_LIMIT (0 = выключить). */
+function defaultDailyTokenLimit() {
+  const fromEnv = Number(process.env.DAILY_TOKEN_LIMIT);
+  if (Number.isFinite(fromEnv)) return Math.max(0, Math.floor(fromEnv));
+  return 100000;
+}
+
+/**
+ * Персональный лимит токенов.
+ * NULL/undefined → дефолт; 0 → безлимит; >0 → своё значение.
+ */
+function resolveDailyTokenLimit(userLimit) {
+  if (userLimit === null || userLimit === undefined) return defaultDailyTokenLimit();
+  const n = Number(userLimit);
+  if (!Number.isFinite(n) || n < 0) return defaultDailyTokenLimit();
+  return Math.floor(n);
+}
+
 /**
  * @param {string} userId - ID пользователя из JWT (auth.user.sub)
- * @returns {Promise<{ok: boolean, error?: string, remaining?: number}>}
+ * @returns {Promise<{ok: boolean, error?: string, remaining?: number, tokens_used_24h?: number, token_limit?: number}>}
  */
 async function checkRateLimit(userId) {
   try {
     // Почасовой потолок по request_log (все OpenAI-эндпоинты в одном бакете).
-    // По умолчанию 20/час — при схемах до 20k символов один migrate/mock заметно дороже.
-    // Переопределение: RATE_HOURLY_LIMIT в env (0 = выключить почасовой лимит).
     const hourlyCap = Number(process.env.RATE_HOURLY_LIMIT);
     const hourly = Number.isFinite(hourlyCap) ? hourlyCap : 20;
     if (hourly > 0) {
@@ -37,34 +53,73 @@ async function checkRateLimit(userId) {
     }
 
     const { rows } = await pool.query(
-      "SELECT daily_request_limit FROM users WHERE id = $1",
+      "SELECT daily_request_limit, daily_token_limit FROM users WHERE id = $1",
       [userId]
     );
-    const limit = rows[0]?.daily_request_limit;
+    const row = rows[0] || {};
+    const reqLimit = row.daily_request_limit;
 
-    if (limit === null || limit === undefined) {
-      return { ok: true };
+    // Дневной лимит запросов (если задан админом) — как раньше
+    if (reqLimit !== null && reqLimit !== undefined) {
+      const { rows: countRows } = await pool.query(
+        `SELECT COUNT(*) AS cnt FROM query_history
+         WHERE user_id = $1 AND created_at > NOW() - INTERVAL '24 hours'`,
+        [userId]
+      );
+      const used = parseInt(countRows[0]?.cnt || 0, 10);
+      if (used >= reqLimit) {
+        return {
+          ok: false,
+          error: `Превышен дневной лимит запросов (${reqLimit}/день). Лимит обновится через 24 часа, либо обратитесь к администратору.`,
+        };
+      }
     }
 
-    const { rows: countRows } = await pool.query(
-      `SELECT COUNT(*) AS cnt FROM query_history
-       WHERE user_id = $1 AND created_at > NOW() - INTERVAL '24 hours'`,
-      [userId]
-    );
-    const used = parseInt(countRows[0]?.cnt || 0, 10);
+    // Дневной лимит токенов (по умолчанию 100k для всех)
+    const tokenLimit = resolveDailyTokenLimit(row.daily_token_limit);
+    if (tokenLimit > 0) {
+      let usedTokens = 0;
+      try {
+        const { rows: tokRows } = await pool.query(
+          `SELECT COALESCE(SUM(tokens_used), 0)::bigint AS sum_tokens
+           FROM request_log
+           WHERE user_id = $1 AND created_at > NOW() - INTERVAL '24 hours'`,
+          [userId]
+        );
+        usedTokens = parseInt(tokRows[0]?.sum_tokens || 0, 10);
+      } catch (e) {
+        // колонки ещё нет — не блокируем
+        if (e && e.code !== "42703") throw e;
+      }
 
-    if (used >= limit) {
+      if (usedTokens >= tokenLimit) {
+        return {
+          ok: false,
+          error: `Превышен дневной лимит токенов (${tokenLimit.toLocaleString("ru")} / 24ч). Уже использовано ${usedTokens.toLocaleString("ru")}. Подождите или обратитесь к администратору.`,
+          tokens_used_24h: usedTokens,
+          token_limit: tokenLimit,
+        };
+      }
       return {
-        ok: false,
-        error: `Превышен дневной лимит запросов (${limit}/день). Лимит обновится через 24 часа от первого запроса в текущем окне, либо обратитесь к администратору.`,
+        ok: true,
+        remaining: tokenLimit - usedTokens,
+        tokens_used_24h: usedTokens,
+        token_limit: tokenLimit,
       };
     }
-    return { ok: true, remaining: limit - used };
+
+    return { ok: true };
   } catch (e) {
     trackError("checkRateLimit", e);
     if (isTransientDbError(e)) return { ok: true };
+    // Если нет колонки daily_token_limit — не валим сервис
+    if (e && e.code === "42703") return { ok: true };
     return { ok: true };
   }
 }
 
-module.exports = { checkRateLimit };
+module.exports = {
+  checkRateLimit,
+  defaultDailyTokenLimit,
+  resolveDailyTokenLimit,
+};

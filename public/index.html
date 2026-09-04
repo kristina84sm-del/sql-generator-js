@@ -322,7 +322,7 @@ pre.codeblock{margin:0;background:var(--bg);border-radius:7px;overflow-x:auto;fo
     <div class="un" id="sb_name">—</div>
     <div class="ue" id="sb_email">—</div>
     <div class="us">Запросов: <strong id="sb_count">—</strong></div>
-    <div class="us">Токенов использовано: <strong id="sb_tokens">—</strong></div>
+    <div class="us">Токены за 24ч: <strong id="sb_tokens">—</strong></div>
     <button class="btn-out" onclick="doLogout()">Выйти из аккаунта</button>
     <button class="btn-out" onclick="doDeleteAccount()"
       style="margin-top:.25rem;font-size:.72rem;color:rgba(239,68,68,.6);border-color:rgba(239,68,68,.2);">
@@ -898,7 +898,13 @@ function updateUserCard(cnt){
   if(ee)ee.textContent=gUser.email||"—";
   const n=cnt!==undefined?cnt:(gUser.request_count??"—");
   if(ce)ce.textContent=n;
-  if(te)te.textContent=(gUser.tokens_total!==undefined?gUser.tokens_total:0).toLocaleString("ru");
+  if(te){
+    const used=gUser.tokens_used_24h!=null?gUser.tokens_used_24h:(gUser.tokens_total||0);
+    const lim=gUser.daily_token_limit_effective;
+    te.textContent = lim
+      ? used.toLocaleString("ru")+" / "+lim.toLocaleString("ru")
+      : used.toLocaleString("ru")+" (безлимит)";
+  }
 }
 async function refreshStats(){
   try{
@@ -2814,12 +2820,22 @@ async function loadAdminStats(){
       const hasLimit = limit !== null && limit !== undefined;
       const isOverLimit  = hasLimit && u.requests_today >= limit;
       const isNearLimit  = hasLimit && !isOverLimit && u.requests_today >= limit * 0.8;
-      const rowStyle = isOverLimit ? "background:rgba(239,68,68,.15);" : isNearLimit ? "background:rgba(239,68,68,.08);" : "";
+      const tokLim = u.daily_token_limit_effective || data.default_daily_token_limit || 100000;
+      const tokUsed = Number(u.tokens_24h || 0);
+      const tokOver = tokLim > 0 && tokUsed >= tokLim;
+      const tokNear = tokLim > 0 && !tokOver && tokUsed >= tokLim * 0.8;
+      const tokStored = (u.daily_token_limit === null || u.daily_token_limit === undefined) ? "" : u.daily_token_limit;
+      const rowStyle = (isOverLimit || tokOver) ? "background:rgba(239,68,68,.15);" : (isNearLimit || tokNear) ? "background:rgba(239,68,68,.08);" : "";
       const alertBadge = isOverLimit
-        ? `<span style="font-size:.68rem;color:#fff;background:#ef4444;padding:.1rem .4rem;border-radius:4px;margin-left:.4rem;">⛔ лимит превышен</span>`
+        ? `<span style="font-size:.68rem;color:#fff;background:#ef4444;padding:.1rem .4rem;border-radius:4px;margin-left:.4rem;">⛔ лимит запросов</span>`
         : isNearLimit
         ? `<span style="font-size:.68rem;color:#fca5a5;background:rgba(239,68,68,.15);padding:.1rem .4rem;border-radius:4px;margin-left:.4rem;">⚠ близко к лимиту</span>`
-        : ""; 
+        : "";
+      const tokBadge = tokOver
+        ? `<span style="font-size:.68rem;color:#fff;background:#ef4444;padding:.1rem .4rem;border-radius:4px;margin-left:.35rem;">⛔ токены</span>`
+        : tokNear
+        ? `<span style="font-size:.68rem;color:#fca5a5;margin-left:.35rem;">⚠ токены</span>`
+        : "";
       return `
         <tr style="${rowStyle}border-bottom:1px solid var(--border);">
           <td style="padding:.6rem .5rem;">
@@ -2829,6 +2845,7 @@ async function loadAdminStats(){
           <td style="padding:.6rem .5rem;text-align:center;">${u.requests_today}${alertBadge}</td>
           <td style="padding:.6rem .5rem;text-align:center;">${u.requests_week}</td>
           <td style="padding:.6rem .5rem;text-align:center;color:var(--muted);">${u.requests_total}</td>
+          <td style="padding:.6rem .5rem;text-align:center;">${tokUsed.toLocaleString("ru")} / ${tokLim.toLocaleString("ru")}${tokBadge}</td>
           <td style="padding:.6rem .5rem;text-align:center;color:var(--muted);">${(u.tokens_total||0).toLocaleString("ru")}</td>
           <td style="padding:.6rem .5rem;">
             <input type="number" min="0" value="${limitDisplay}" placeholder="безлимит"
@@ -2836,6 +2853,14 @@ async function loadAdminStats(){
           </td>
          <td style="padding:.6rem .5rem;">
             <button class="btn-sec" style="padding:.35rem .7rem;font-size:.78rem;" onclick="adminSaveLimit('${u.id}')">Сохранить</button>
+          </td>
+          <td style="padding:.6rem .5rem;">
+            <input type="number" min="0" value="${tokStored}" placeholder="100000"
+              title="Пусто = дефолт ${tokLim}, 0 = безлимит"
+              id="admin_tok_limit_${u.id}" style="width:100px;padding:.4rem .5rem;border-radius:5px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:.85rem;"/>
+          </td>
+          <td style="padding:.6rem .5rem;">
+            <button class="btn-sec" style="padding:.35rem .7rem;font-size:.78rem;" onclick="adminSaveTokenLimit('${u.id}')">Сохранить</button>
           </td>
           <td style="padding:.6rem .5rem;">
             <button class="btn-sec" style="padding:.35rem .7rem;font-size:.78rem;${u.is_admin ? 'color:var(--danger);border-color:var(--danger);' : ''}"
@@ -2854,14 +2879,18 @@ async function loadAdminStats(){
             <th style="padding:.6rem .5rem;text-align:center;">Сегодня</th>
             <th style="padding:.6rem .5rem;text-align:center;">7 дней</th>
             <th style="padding:.6rem .5rem;text-align:center;">Всего</th>
-            <th style="padding:.6rem .5rem;text-align:center;">Токены</th>
-      <th style="padding:.6rem .5rem;">Лимит/день</th>
+            <th style="padding:.6rem .5rem;text-align:center;">Токены/24ч</th>
+            <th style="padding:.6rem .5rem;text-align:center;">Токены всего</th>
+            <th style="padding:.6rem .5rem;">Лимит запросов</th>
+            <th style="padding:.6rem .5rem;"></th>
+            <th style="padding:.6rem .5rem;">Лимит токенов</th>
             <th style="padding:.6rem .5rem;"></th>
             <th style="padding:.6rem .5rem;">Права</th>
           </tr>
         </thead>
         <tbody>${rows}</tbody>
-      </table>`;      
+      </table>
+      <p style="font-size:.78rem;color:var(--muted);margin-top:.6rem;">Дефолт токенов: ${(data.default_daily_token_limit||100000).toLocaleString("ru")} / 24ч. Пустое поле «Лимит токенов» = дефолт, 0 = безлимит.</p>`;      
   }catch(e){
     host.innerHTML = `<div class="no-tbl" style="color:var(--danger);">Ошибка: ${esc(e.message)}</div>`;
   }
@@ -2881,6 +2910,22 @@ async function adminSaveLimit(userId){
     if (!res.ok) throw new Error(data.error || "Ошибка сохранения (сервер вернул не-JSON ответ)");
     await loadAdminStats();
     alert("Лимит сохранён.");
+  }catch(e){ alert("Ошибка: " + e.message); }
+}
+async function adminSaveTokenLimit(userId){
+  const input = document.getElementById("admin_tok_limit_"+userId);
+  if (!input) return;
+  const raw = input.value.trim();
+  const limit = raw === "" ? null : parseInt(raw, 10);
+  try{
+    const res = await fetch("/admin_panel?action=set_token_limit", {
+      method:"POST", headers:hdrs(), credentials:"include",
+      body: JSON.stringify({ user_id: userId, limit })
+    });
+    const data = await res.json().catch(()=>({}));
+    if (!res.ok) throw new Error(data.error || "Ошибка сохранения лимита токенов");
+    await loadAdminStats();
+    alert("Лимит токенов сохранён.");
   }catch(e){ alert("Ошибка: " + e.message); }
 }
 async function adminToggleAdmin(userId, makeAdmin){
