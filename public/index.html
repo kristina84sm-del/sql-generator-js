@@ -2825,7 +2825,15 @@ async function loadAdminStats(){
       const tokUsed = Number(u.tokens_24h || 0);
       const tokOver = tokLim > 0 && tokUsed >= tokLim;
       const tokNear = tokLim > 0 && !tokOver && tokUsed >= tokLim * 0.8;
-      const tokStored = (u.daily_token_limit === null || u.daily_token_limit === undefined) ? "" : u.daily_token_limit;
+      const tokStored = (u.daily_token_limit === null || u.daily_token_limit === undefined)
+        ? ""
+        : u.daily_token_limit;
+      const tokPlaceholder = "дефолт " + tokLim;
+      const tokHint = (u.daily_token_limit === null || u.daily_token_limit === undefined)
+        ? `<div style="font-size:.7rem;color:var(--muted);margin-top:.2rem;">сейчас: ${tokLim.toLocaleString("ru")} (дефолт)</div>`
+        : (Number(u.daily_token_limit) === 0
+          ? `<div style="font-size:.7rem;color:var(--muted);margin-top:.2rem;">сейчас: безлимит</div>`
+          : `<div style="font-size:.7rem;color:var(--muted);margin-top:.2rem;">сейчас: ${Number(u.daily_token_limit).toLocaleString("ru")}</div>`);
       const rowStyle = (isOverLimit || tokOver) ? "background:rgba(239,68,68,.15);" : (isNearLimit || tokNear) ? "background:rgba(239,68,68,.08);" : "";
       const alertBadge = isOverLimit
         ? `<span style="font-size:.68rem;color:#fff;background:#ef4444;padding:.1rem .4rem;border-radius:4px;margin-left:.4rem;">⛔ лимит запросов</span>`
@@ -2849,16 +2857,17 @@ async function loadAdminStats(){
           <td style="padding:.6rem .5rem;text-align:center;">${tokUsed.toLocaleString("ru")} / ${tokLim.toLocaleString("ru")}${tokBadge}</td>
           <td style="padding:.6rem .5rem;text-align:center;color:var(--muted);">${(u.tokens_total||0).toLocaleString("ru")}</td>
           <td style="padding:.6rem .5rem;">
-            <input type="number" min="0" value="${limitDisplay}" placeholder="безлимит"
+            <input type="number" min="0" value="${limitDisplay}" placeholder="безлимит запросов"
               id="admin_limit_${u.id}" style="width:90px;padding:.4rem .5rem;border-radius:5px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:.85rem;"/>
           </td>
          <td style="padding:.6rem .5rem;">
             <button class="btn-sec" style="padding:.35rem .7rem;font-size:.78rem;" onclick="adminSaveLimit('${u.id}')">Сохранить</button>
           </td>
           <td style="padding:.6rem .5rem;">
-            <input type="number" min="0" value="${tokStored}" placeholder="100000"
-              title="Пусто = дефолт ${tokLim}, 0 = безлимит"
-              id="admin_tok_limit_${u.id}" style="width:100px;padding:.4rem .5rem;border-radius:5px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:.85rem;"/>
+            <input type="number" min="0" value="${tokStored}" placeholder="${tokPlaceholder}"
+              title="Пусто = дефолт ${tokLim}, 0 = безлимит токенов"
+              id="admin_tok_limit_${u.id}" style="width:110px;padding:.4rem .5rem;border-radius:5px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:.85rem;"/>
+            ${tokHint}
           </td>
           <td style="padding:.6rem .5rem;">
             <button class="btn-sec" style="padding:.35rem .7rem;font-size:.78rem;" onclick="adminSaveTokenLimit('${u.id}')">Сохранить</button>
