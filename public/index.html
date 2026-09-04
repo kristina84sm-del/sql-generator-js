@@ -691,7 +691,7 @@ pre.codeblock{margin:0;background:var(--bg);border-radius:7px;overflow-x:auto;fo
 </div>
 <!-- ВКЛАДКА 6: АДМИН (видна только администраторам) -->
 <div class="tab-pane" id="pane_admin">
-  <div class="tip"><span class="ico">ℹ️</span><span>Контроль расхода токенов: статистика запросов по пользователям и установка дневных лимитов.</span></div>
+  <div class="tip"><span class="ico">ℹ️</span><span>По умолчанию у всех действует лимит <strong>100 000 токенов / 24ч</strong> (даже если в таблице поле пустое). Ниже — отдельный лимит по числу запросов и персональный лимит токенов.</span></div>
  
   <div class="card">
     <h2>Сводка за сегодня</h2>
@@ -700,10 +700,11 @@ pre.codeblock{margin:0;background:var(--bg);border-radius:7px;overflow-x:auto;fo
   </div>
  
   <div class="card">
-    <h2>Лимит для всех пользователей сразу</h2>
+    <h2>Лимит запросов для всех сразу</h2>
+    <p style="font-size:.82rem;color:var(--muted);margin:0 0 .7rem;">Это не токены. Пустое поле = без лимита по числу запросов. Лимит токенов 100 000 уже включён по умолчанию у всех.</p>
     <div style="display:flex;gap:.6rem;align-items:flex-end;">
       <div class="fg" style="flex:1;margin-bottom:0;">
-        <label>Запросов в день (оставьте пустым — безлимит)</label>
+        <label>Запросов в день (оставьте пустым — безлимит запросов)</label>
         <input type="number" id="admin_bulk_limit" min="0" placeholder="например, 200"
           style="width:100%;padding:.68rem .88rem;border-radius:7px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:.93rem;"/>
       </div>
